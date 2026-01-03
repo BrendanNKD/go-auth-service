@@ -14,6 +14,13 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 
+var parseTokenWithClaims = func(tokenStr string, claims *Claims, secret []byte) (*jwt.Token, error) {
+	parser := jwt.NewParser(jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Name}))
+	return parser.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (interface{}, error) {
+		return secret, nil
+	})
+}
+
 // GenerateToken creates a signed JWT for the provided claims.
 func GenerateToken(claims Claims, ttl time.Duration, issuer string, secret []byte) (string, error) {
 	now := time.Now()
@@ -28,11 +35,8 @@ func GenerateToken(claims Claims, ttl time.Duration, issuer string, secret []byt
 
 // ParseToken validates a token and returns its claims if valid.
 func ParseToken(tokenStr string, secret []byte) (*Claims, error) {
-	parser := jwt.NewParser(jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Name}))
 	claims := &Claims{}
-	token, err := parser.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (interface{}, error) {
-		return secret, nil
-	})
+	token, err := parseTokenWithClaims(tokenStr, claims, secret)
 	if err != nil {
 		return nil, fmt.Errorf("invalid token: %w", err)
 	}

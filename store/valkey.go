@@ -19,6 +19,12 @@ type RefreshTokenStore interface {
 	Close() error
 }
 
+var (
+	dialContext    = (&net.Dialer{}).DialContext
+	newBufioReader = bufio.NewReader
+	newBufioWriter = bufio.NewWriter
+)
+
 type ValkeyStore struct {
 	addr     string
 	password string
@@ -78,7 +84,7 @@ func (v *ValkeyStore) key(tokenID string) string {
 }
 
 func (v *ValkeyStore) do(ctx context.Context, args ...string) (string, error) {
-	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", v.addr)
+	conn, err := dialContext(ctx, "tcp", v.addr)
 	if err != nil {
 		return "", err
 	}
@@ -89,8 +95,8 @@ func (v *ValkeyStore) do(ctx context.Context, args ...string) (string, error) {
 		_ = conn.SetDeadline(time.Now().Add(v.timeout))
 	}
 
-	reader := bufio.NewReader(conn)
-	writer := bufio.NewWriter(conn)
+	reader := newBufioReader(conn)
+	writer := newBufioWriter(conn)
 
 	if v.password != "" {
 		if err := writeCommand(writer, "AUTH", v.password); err != nil {
