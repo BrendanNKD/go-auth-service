@@ -13,11 +13,11 @@ import (
 func SetupRoutes(cfg config.Config, authHandler *handlers.AuthHandler) *mux.Router {
 	router := mux.NewRouter()
 
-	router.HandleFunc("/register", authHandler.RegisterHandler).Methods("POST")
-	router.HandleFunc("/login", authHandler.LoginHandler).Methods("POST")
-	router.HandleFunc("/refresh", authHandler.RefreshHandler).Methods("POST")
-	router.HandleFunc("/logout", authHandler.LogoutHandler).Methods("POST")
-	router.Handle("/authenticate", middleware.AuthMiddleware(cfg)(http.HandlerFunc(authHandler.AuthenticateHandler))).Methods("GET")
+	router.HandleFunc("/register", middleware.ErrorHandler(authHandler.RegisterHandler)).Methods("POST")
+	router.HandleFunc("/login", middleware.ErrorHandler(authHandler.LoginHandler)).Methods("POST")
+	router.HandleFunc("/refresh", middleware.ErrorHandler(authHandler.RefreshHandler)).Methods("POST")
+	router.HandleFunc("/logout", middleware.ErrorHandler(authHandler.LogoutHandler)).Methods("POST")
+	router.Handle("/authenticate", middleware.AuthMiddleware(cfg)(middleware.ErrorHandler(authHandler.AuthenticateHandler))).Methods("GET")
 	router.HandleFunc("/health", handlers.HealthHandler).Methods("GET")
 
 	return router

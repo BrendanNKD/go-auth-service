@@ -39,111 +39,100 @@ func NewAuthHandler(cfg config.Config, tokenStore store.RefreshTokenStore) *Auth
 	return &AuthHandler{cfg: cfg, tokenStore: tokenStore}
 }
 
-func (h *AuthHandler) RegisterHandler(w http.ResponseWriter, r *http.Request) {
+func (h *AuthHandler) RegisterHandler(w http.ResponseWriter, r *http.Request) error {
 	w.Header().Set("Content-Type", "application/json")
 	var user models.Users
 	if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
-		http.Error(w, "Invalid request payload", http.StatusBadRequest)
-		return
+		return middleware.NewAppError(http.StatusBadRequest, "Invalid request payload", err)
 	}
 
 	if user.Username == "" || user.Password == "" {
-		http.Error(w, "Username and password are required", http.StatusBadRequest)
-		return
+		return middleware.NewAppError(http.StatusBadRequest, "Username and password are required", nil)
 	}
 
 	hashedPassword, err := generateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	if err != nil {
 		log.Printf("Error hashing password: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
+		return middleware.NewAppError(http.StatusInternalServerError, "Internal server error", err)
 	}
 
 	_, err = db.DB.Exec("INSERT INTO users (username, password, role) VALUES ($1, $2, $3)",
 		user.Username, string(hashedPassword), user.Role)
 	if err != nil {
 		log.Printf("Error inserting user into database: %v", err)
-		http.Error(w, "User already exists or database error", http.StatusConflict)
-		return
+		return middleware.NewAppError(http.StatusConflict, "User already exists or database error", err)
 	}
 
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(JSONResponse{"message": "User registered successfully"})
+	return nil
 }
 
-func (h *AuthHandler) LoginHandler(w http.ResponseWriter, r *http.Request) {
+func (h *AuthHandler) LoginHandler(w http.ResponseWriter, r *http.Request) error {
 	w.Header().Set("Content-Type", "application/json")
 	var user models.Users
 	if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
-		http.Error(w, "Invalid request payload", http.StatusBadRequest)
-		return
+		return middleware.NewAppError(http.StatusBadRequest, "Invalid request payload", err)
 	}
 
 	if user.Username == "" || user.Password == "" {
-		http.Error(w, "Username and password are required", http.StatusBadRequest)
-		return
+		return middleware.NewAppError(http.StatusBadRequest, "Username and password are required", nil)
 	}
 
 	var storedPassword, role string
 	err := db.DB.QueryRow("SELECT password, role FROM users WHERE username = $1", user.Username).Scan(&storedPassword, &role)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			http.Error(w, "Invalid username or password", http.StatusUnauthorized)
+			return middleware.NewAppError(http.StatusUnauthorized, "Invalid username or password", err)
 		} else {
 			log.Printf("Database error: %v", err)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return middleware.NewAppError(http.StatusInternalServerError, "Internal server error", err)
 		}
-		return
 	}
 
 	if err := compareHashAndPassword([]byte(storedPassword), []byte(user.Password)); err != nil {
-		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
-		return
+		return middleware.NewAppError(http.StatusUnauthorized, "Invalid username or password", err)
 	}
 
 	if err := h.issueTokens(r.Context(), w, user.Username, role); err != nil {
 		log.Printf("Error issuing tokens: %v", err)
-		http.Error(w, "Could not generate tokens", http.StatusInternalServerError)
-		return
+		return middleware.NewAppError(http.StatusInternalServerError, "Could not generate tokens", err)
 	}
 
 	json.NewEncoder(w).Encode(JSONResponse{"message": "Login successful"})
+	return nil
 }
 
-func (h *AuthHandler) RefreshHandler(w http.ResponseWriter, r *http.Request) {
+func (h *AuthHandler) RefreshHandler(w http.ResponseWriter, r *http.Request) error {
 	w.Header().Set("Content-Type", "application/json")
 
 	refreshToken, err := readCookie(r, h.cfg.Auth.RefreshCookieName)
 	if err != nil {
-		http.Error(w, "Refresh token is required", http.StatusUnauthorized)
-		return
+		return middleware.NewAppError(http.StatusUnauthorized, "Refresh token is required", err)
 	}
 
 	claims, err := utils.ParseToken(refreshToken, h.cfg.Auth.RefreshTokenSecret)
 	if err != nil {
-		http.Error(w, "Invalid refresh token", http.StatusUnauthorized)
-		return
+		return middleware.NewAppError(http.StatusUnauthorized, "Invalid refresh token", err)
 	}
 
 	if err := h.validateRefreshToken(r.Context(), claims.ID); err != nil {
-		http.Error(w, "Refresh token revoked", http.StatusUnauthorized)
-		return
+		return middleware.NewAppError(http.StatusUnauthorized, "Refresh token revoked", err)
 	}
 
 	if err := h.rotateTokens(r.Context(), w, claims); err != nil {
 		log.Printf("Error rotating tokens: %v", err)
-		http.Error(w, "Could not refresh token", http.StatusInternalServerError)
-		return
+		return middleware.NewAppError(http.StatusInternalServerError, "Could not refresh token", err)
 	}
 
 	json.NewEncoder(w).Encode(JSONResponse{"message": "Token refreshed"})
+	return nil
 }
 
-func (h *AuthHandler) AuthenticateHandler(w http.ResponseWriter, r *http.Request) {
+func (h *AuthHandler) AuthenticateHandler(w http.ResponseWriter, r *http.Request) error {
 	claims, ok := middleware.ClaimsFromContext(r.Context())
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
+		return middleware.NewAppError(http.StatusUnauthorized, "Unauthorized", nil)
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -152,9 +141,10 @@ func (h *AuthHandler) AuthenticateHandler(w http.ResponseWriter, r *http.Request
 		"username": claims.Username,
 		"role":     claims.Role,
 	})
+	return nil
 }
 
-func (h *AuthHandler) LogoutHandler(w http.ResponseWriter, r *http.Request) {
+func (h *AuthHandler) LogoutHandler(w http.ResponseWriter, r *http.Request) error {
 	w.Header().Set("Content-Type", "application/json")
 
 	refreshToken, err := readCookie(r, h.cfg.Auth.RefreshCookieName)
@@ -169,6 +159,7 @@ func (h *AuthHandler) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(JSONResponse{"message": "Logged out successfully"})
+	return nil
 }
 
 func (h *AuthHandler) issueTokens(ctx context.Context, w http.ResponseWriter, username, role string) error {

@@ -56,9 +56,7 @@ func TestLoginHandlerIssueTokensError(t *testing.T) {
 	body, _ := json.Marshal(user)
 
 	req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewBuffer(body))
-	rec := httptest.NewRecorder()
-
-	handler.LoginHandler(rec, req)
+	rec := executeRequest(handler.LoginHandler, req)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
@@ -75,9 +73,7 @@ func TestLogoutHandlerRevokesToken(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
 	req.AddCookie(&http.Cookie{Name: cfg.Auth.RefreshCookieName, Value: token})
-	rec := httptest.NewRecorder()
-
-	handler.LogoutHandler(rec, req)
+	rec := executeRequest(handler.LogoutHandler, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.True(t, store.revoked)
 }
