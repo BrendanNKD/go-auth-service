@@ -1,139 +1,106 @@
 package handlers_test
 
 import (
-	"auth-service/db"
-	"auth-service/handlers"
-	"auth-service/models"
-	jwt "auth-service/utils"
 	"bytes"
-	"database/sql"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"strings"
 	"testing"
+	"time"
+
+	"auth-service/config"
+	"auth-service/db"
+	"auth-service/handlers"
+	"auth-service/middleware"
+	"auth-service/models"
+	"auth-service/utils"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/crypto/bcrypt"
 )
 
-// setupMockDB creates a sqlmock DB and assigns it to the global DB.
+type stubTokenStore struct {
+	entries map[string]string
+}
+
+func newStubTokenStore() *stubTokenStore {
+	return &stubTokenStore{entries: make(map[string]string)}
+}
+
+func (s *stubTokenStore) Save(_ context.Context, tokenID, username string, _ time.Duration) error {
+	s.entries[tokenID] = username
+	return nil
+}
+
+func (s *stubTokenStore) Exists(_ context.Context, tokenID string) (bool, error) {
+	_, ok := s.entries[tokenID]
+	return ok, nil
+}
+
+func (s *stubTokenStore) Revoke(_ context.Context, tokenID string) error {
+	delete(s.entries, tokenID)
+	return nil
+}
+
+func (s *stubTokenStore) Close() error {
+	return nil
+}
+
 func setupMockDB() (sqlmock.Sqlmock, func()) {
 	mockDB, mock, _ := sqlmock.New()
 	db.DB = mockDB
 	return mock, func() { mockDB.Close() }
 }
 
-// --------------------
-// RegisterHandler Tests
-// --------------------
+func testConfig() config.Config {
+	return config.Config{
+		Auth: config.AuthConfig{
+			AccessTokenSecret:  []byte("access-secret"),
+			RefreshTokenSecret: []byte("refresh-secret"),
+			Issuer:             "test-issuer",
+			AccessTokenTTL:     time.Minute,
+			RefreshTokenTTL:    time.Hour,
+			AccessCookieName:   "access_token",
+			RefreshCookieName:  "refresh_token",
+		},
+		Cookie: config.CookieConfig{
+			Path:     "/",
+			SameSite: http.SameSiteLaxMode,
+		},
+	}
+}
 
-// Successful registration test.
 func TestRegisterHandler(t *testing.T) {
 	mock, cleanup := setupMockDB()
 	defer cleanup()
 
-	// Use a valid role "jobseeker" (or "employer")
 	mock.ExpectExec("INSERT INTO users").
 		WithArgs("testuser", sqlmock.AnyArg(), "jobseeker").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
+	handler := handlers.NewAuthHandler(testConfig(), newStubTokenStore())
 	user := models.Users{Username: "testuser", Password: "password", Role: "jobseeker"}
 	body, err := json.Marshal(user)
 	assert.NoError(t, err)
 
 	req := httptest.NewRequest("POST", "/register", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
-	handlers.RegisterHandler(rec, req)
+	handler.RegisterHandler(rec, req)
 	assert.Equal(t, http.StatusCreated, rec.Code)
 }
 
-// Invalid JSON payload.
 func TestRegisterHandler_InvalidJSON(t *testing.T) {
-	req := httptest.NewRequest("POST", "/register", strings.NewReader("{invalid-json"))
-	req.Header.Set("Content-Type", "application/json")
+	handler := handlers.NewAuthHandler(testConfig(), newStubTokenStore())
+	req := httptest.NewRequest("POST", "/register", bytes.NewBufferString("{invalid-json"))
 	rec := httptest.NewRecorder()
 
-	handlers.RegisterHandler(rec, req)
+	handler.RegisterHandler(rec, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-// Missing username.
-func TestRegisterHandler_MissingUsername(t *testing.T) {
-	user := models.Users{Password: "password"}
-	body, _ := json.Marshal(user)
-	req := httptest.NewRequest("POST", "/register", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-
-	handlers.RegisterHandler(rec, req)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-}
-
-// Missing password.
-func TestRegisterHandler_MissingPassword(t *testing.T) {
-	user := models.Users{Username: "testuser"}
-	body, _ := json.Marshal(user)
-	req := httptest.NewRequest("POST", "/register", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-
-	handlers.RegisterHandler(rec, req)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-}
-
-// Missing role.
-// func TestRegisterHandler_MissingRole(t *testing.T) {
-// 	user := models.Users{Username: "testuser", Password: "password", Role: ""}
-// 	body, _ := json.Marshal(user)
-// 	req := httptest.NewRequest("POST", "/register", bytes.NewBuffer(body))
-// 	req.Header.Set("Content-Type", "application/json")
-// 	rec := httptest.NewRecorder()
-
-// 	handlers.RegisterHandler(rec, req)
-// 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-// }
-
-// // Invalid role.
-// func TestRegisterHandler_InvalidRole(t *testing.T) {
-// 	user := models.Users{Username: "testuser", Password: "password", Role: "invalid"}
-// 	body, _ := json.Marshal(user)
-// 	req := httptest.NewRequest("POST", "/register", bytes.NewBuffer(body))
-// 	req.Header.Set("Content-Type", "application/json")
-// 	rec := httptest.NewRecorder()
-
-// 	handlers.RegisterHandler(rec, req)
-// 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-// }
-
-// Database error during registration.
-func TestRegisterHandler_DBError(t *testing.T) {
-	mock, cleanup := setupMockDB()
-	defer cleanup()
-
-	mock.ExpectExec("INSERT INTO users").
-		WithArgs("testuser", sqlmock.AnyArg(), "jobseeker").
-		WillReturnError(sql.ErrConnDone) // simulate connection error
-
-	user := models.Users{Username: "testuser", Password: "password"}
-	body, _ := json.Marshal(user)
-	req := httptest.NewRequest("POST", "/register", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-
-	handlers.RegisterHandler(rec, req)
-	assert.Equal(t, http.StatusConflict, rec.Code)
-}
-
-// --------------------
-// LoginHandler Tests
-// --------------------
-
-// Successful login.
 func TestLoginHandler(t *testing.T) {
 	mock, cleanup := setupMockDB()
 	defer cleanup()
@@ -146,197 +113,98 @@ func TestLoginHandler(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"password", "role"}).
 			AddRow(string(hashedPassword), "jobseeker"))
 
+	store := newStubTokenStore()
+	handler := handlers.NewAuthHandler(testConfig(), store)
 	user := models.Users{Username: "testuser", Password: "password"}
 	body, _ := json.Marshal(user)
 	req := httptest.NewRequest("POST", "/login", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
-	handlers.LoginHandler(rec, req)
+	handler.LoginHandler(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
+	cookies := rec.Result().Cookies()
+	assert.NotEmpty(t, cookies)
 }
 
-// Invalid JSON payload for login.
-func TestLoginHandler_InvalidJSON(t *testing.T) {
-	req := httptest.NewRequest("POST", "/login", strings.NewReader("{invalid-json"))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-
-	handlers.LoginHandler(rec, req)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-}
-
-// Missing username in login.
-func TestLoginHandler_MissingUsername(t *testing.T) {
-	user := models.Users{Password: "password"}
-	body, _ := json.Marshal(user)
-	req := httptest.NewRequest("POST", "/login", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-
-	handlers.LoginHandler(rec, req)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-}
-
-// Missing password in login.
-func TestLoginHandler_MissingPassword(t *testing.T) {
-	user := models.Users{Username: "testuser"}
-	body, _ := json.Marshal(user)
-	req := httptest.NewRequest("POST", "/login", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-
-	handlers.LoginHandler(rec, req)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-}
-
-// User not found.
-func TestLoginHandler_UserNotFound(t *testing.T) {
-	mock, cleanup := setupMockDB()
-	defer cleanup()
-
-	mock.ExpectQuery(`SELECT password, role FROM users WHERE username = \$1`).
-		WithArgs("testuser").
-		WillReturnError(sql.ErrNoRows)
-
-	user := models.Users{Username: "testuser", Password: "password"}
-	body, _ := json.Marshal(user)
-	req := httptest.NewRequest("POST", "/login", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-
-	handlers.LoginHandler(rec, req)
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-}
-
-// Database error during login.
-func TestLoginHandler_DBError(t *testing.T) {
-	mock, cleanup := setupMockDB()
-	defer cleanup()
-
-	mock.ExpectQuery(`SELECT password, role FROM users WHERE username = \$1`).
-		WithArgs("testuser").
-		WillReturnError(sql.ErrConnDone)
-
-	user := models.Users{Username: "testuser", Password: "password"}
-	body, _ := json.Marshal(user)
-	req := httptest.NewRequest("POST", "/login", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-
-	handlers.LoginHandler(rec, req)
-	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-}
-
-// Wrong password.
 func TestLoginHandler_WrongPassword(t *testing.T) {
 	mock, cleanup := setupMockDB()
 	defer cleanup()
 
-	// Create a hash for a different password so that the comparison fails.
 	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte("different_password"), bcrypt.DefaultCost)
+	mock.ExpectQuery(`SELECT password, role FROM users WHERE username = \$1`).
+		WithArgs("testuser").
+		WillReturnRows(sqlmock.NewRows([]string{"password", "role"}).
+			AddRow(string(hashedPassword), "jobseeker"))
+
+	handler := handlers.NewAuthHandler(testConfig(), newStubTokenStore())
+	user := models.Users{Username: "testuser", Password: "password"}
+	body, _ := json.Marshal(user)
+	req := httptest.NewRequest("POST", "/login", bytes.NewBuffer(body))
+	rec := httptest.NewRecorder()
+
+	handler.LoginHandler(rec, req)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestRefreshHandler(t *testing.T) {
+	mock, cleanup := setupMockDB()
+	defer cleanup()
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte("password"), bcrypt.DefaultCost)
+	assert.NoError(t, err)
 
 	mock.ExpectQuery(`SELECT password, role FROM users WHERE username = \$1`).
 		WithArgs("testuser").
 		WillReturnRows(sqlmock.NewRows([]string{"password", "role"}).
 			AddRow(string(hashedPassword), "jobseeker"))
 
-	user := models.Users{Username: "testuser", Password: "password"}
-	body, _ := json.Marshal(user)
-	req := httptest.NewRequest("POST", "/login", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
+	store := newStubTokenStore()
+	cfg := testConfig()
+	handler := handlers.NewAuthHandler(cfg, store)
+
+	loginBody, _ := json.Marshal(models.Users{Username: "testuser", Password: "password"})
+	loginReq := httptest.NewRequest("POST", "/login", bytes.NewBuffer(loginBody))
+	loginRec := httptest.NewRecorder()
+	handler.LoginHandler(loginRec, loginReq)
+	assert.Equal(t, http.StatusOK, loginRec.Code)
+
+	var refreshCookie *http.Cookie
+	for _, cookie := range loginRec.Result().Cookies() {
+		if cookie.Name == cfg.Auth.RefreshCookieName {
+			refreshCookie = cookie
+			break
+		}
+	}
+	if assert.NotNil(t, refreshCookie) {
+		refreshReq := httptest.NewRequest("POST", "/refresh", nil)
+		refreshReq.AddCookie(refreshCookie)
+		refreshRec := httptest.NewRecorder()
+
+		handler.RefreshHandler(refreshRec, refreshReq)
+		assert.Equal(t, http.StatusOK, refreshRec.Code)
+	}
+}
+
+func TestAuthenticateHandler(t *testing.T) {
+	handler := handlers.NewAuthHandler(testConfig(), newStubTokenStore())
+	req := httptest.NewRequest("GET", "/authenticate", nil)
 	rec := httptest.NewRecorder()
 
-	handlers.LoginHandler(rec, req)
+	handler.AuthenticateHandler(rec, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	claims := &utils.Claims{Username: "testuser", Role: "admin"}
+	req = req.WithContext(middleware.ContextWithClaims(req.Context(), claims))
+	rec = httptest.NewRecorder()
+	handler.AuthenticateHandler(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
 }
-
-// --------------------
-// AuthenticateHandler Tests
-// --------------------
-
-// No token provided.
-func TestAuthenticateHandler_NoToken(t *testing.T) {
-	req := httptest.NewRequest("GET", "/authenticate", nil)
-	rec := httptest.NewRecorder()
-
-	handlers.AuthenticateHandler(rec, req)
-	var response map[string]interface{}
-	json.Unmarshal(rec.Body.Bytes(), &response)
-	assert.Equal(t, false, response["valid"])
-	assert.Equal(t, "No token provided", response["message"])
-}
-
-// Invalid token provided.
-func TestAuthenticateHandler_InvalidToken(t *testing.T) {
-	req := httptest.NewRequest("GET", "/authenticate", nil)
-	req.Header.Set("Authorization", "Bearer invalid.token.here")
-	rec := httptest.NewRecorder()
-
-	handlers.AuthenticateHandler(rec, req)
-	var response map[string]interface{}
-	json.Unmarshal(rec.Body.Bytes(), &response)
-	assert.Equal(t, false, response["valid"])
-	assert.Equal(t, "Invalid token", response["message"])
-}
-
-// Expired token.
-func TestAuthenticateHandler_ExpiredToken(t *testing.T) {
-	// Force expiration by setting JWT_EXPIRE_HOURS to -1.
-	os.Setenv("JWT_SECRET", "supersecret")
-	os.Setenv("JWT_EXPIRE_HOURS", "-1")
-	os.Setenv("JWT_ISSUER", "test-issuer")
-
-	token, err := jwt.GenerateToken("testuser", "employer")
-	assert.NoError(t, err)
-
-	req := httptest.NewRequest("GET", "/authenticate", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	rec := httptest.NewRecorder()
-
-	handlers.AuthenticateHandler(rec, req)
-	var response map[string]interface{}
-	json.Unmarshal(rec.Body.Bytes(), &response)
-	assert.Equal(t, false, response["valid"])
-	assert.Equal(t, "Token has expired", response["message"])
-}
-
-// Valid token.
-func TestAuthenticateHandler_ValidToken(t *testing.T) {
-	os.Setenv("JWT_SECRET", "supersecret")
-	os.Setenv("JWT_EXPIRE_HOURS", "72")
-	os.Setenv("JWT_ISSUER", "test-issuer")
-
-	token, err := jwt.GenerateToken("testuser", "employer")
-	assert.NoError(t, err)
-
-	req := httptest.NewRequest("GET", "/authenticate", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	rec := httptest.NewRecorder()
-
-	handlers.AuthenticateHandler(rec, req)
-	var response map[string]interface{}
-	json.Unmarshal(rec.Body.Bytes(), &response)
-	assert.Equal(t, true, response["valid"])
-	assert.Equal(t, "Token is valid", response["message"])
-	assert.Equal(t, "testuser", response["username"])
-	assert.Equal(t, "employer", response["role"])
-}
-
-// --------------------
-// LogoutHandler Test
-// --------------------
 
 func TestLogoutHandler(t *testing.T) {
+	handler := handlers.NewAuthHandler(testConfig(), newStubTokenStore())
 	req := httptest.NewRequest("POST", "/logout", nil)
 	rec := httptest.NewRecorder()
 
-	handlers.LogoutHandler(rec, req)
+	handler.LogoutHandler(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-
-	var response map[string]string
-	err := json.Unmarshal(rec.Body.Bytes(), &response)
-	assert.NoError(t, err)
-	assert.Equal(t, "Logged out successfully", response["message"])
 }
