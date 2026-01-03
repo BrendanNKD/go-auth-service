@@ -29,6 +29,23 @@ var (
 	logFatal       = log.Fatal
 )
 
+const (
+	defaultAppEnv  = "dev"
+	defaultPort    = "8080"
+	secretJWT      = "prod/jwt"
+	secretPostgres = "prod/postgres"
+	secretValkey   = "prod/valkey"
+)
+
+type postgresSecret struct {
+	Username             string `json:"username"`
+	Password             string `json:"password"`
+	Engine               string `json:"engine"`
+	Host                 string `json:"host"`
+	Port                 int    `json:"port"`
+	DBInstanceIdentifier string `json:"dbInstanceIdentifier"`
+}
+
 func loadSecretMap(secretName string) (map[string]string, error) {
 	secretJSON, err := getSecret(secretName)
 	if err != nil {
@@ -41,37 +58,107 @@ func loadSecretMap(secretName string) (map[string]string, error) {
 	return secrets, nil
 }
 
-func loadProdSecrets() error {
-	jwtSecrets, err := loadSecretMap("prod/jwt")
-	if err != nil {
-		return fmt.Errorf("error retrieving JWT secret: %w", err)
+func setEnv(key, value string) error {
+	if err := os.Setenv(key, value); err != nil {
+		return fmt.Errorf("set env %s: %w", key, err)
 	}
-	for key, value := range jwtSecrets {
-		os.Setenv(key, value)
-	}
+	return nil
+}
 
-	pgSecrets, err := getSecret("prod/postgres")
-	if err != nil {
-		return fmt.Errorf("error retrieving Postgres secret: %w", err)
-	}
-	var pgValues map[string]interface{}
-	if err := json.Unmarshal([]byte(pgSecrets), &pgValues); err != nil {
-		return fmt.Errorf("error parsing Postgres secret JSON: %w", err)
-	}
-	os.Setenv("DB_USERNAME", pgValues["username"].(string))
-	os.Setenv("DB_PASSWORD", pgValues["password"].(string))
-	os.Setenv("DB_ENGINE", pgValues["engine"].(string))
-	os.Setenv("DB_HOST", pgValues["host"].(string))
-	os.Setenv("DB_PORT", fmt.Sprintf("%v", pgValues["port"]))
-	os.Setenv("DB_INSTANCE_IDENTIFIER", pgValues["dbInstanceIdentifier"].(string))
-
-	valkeySecrets, err := loadSecretMap("prod/valkey")
-	if err == nil {
-		for key, value := range valkeySecrets {
-			os.Setenv(key, value)
+func setEnvFromMap(values map[string]string) error {
+	for key, value := range values {
+		if err := setEnv(key, value); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func loadPostgresSecret() (postgresSecret, error) {
+	secretJSON, err := getSecret(secretPostgres)
+	if err != nil {
+		return postgresSecret{}, fmt.Errorf("error retrieving Postgres secret: %w", err)
+	}
+	var pgValues postgresSecret
+	if err := json.Unmarshal([]byte(secretJSON), &pgValues); err != nil {
+		return postgresSecret{}, fmt.Errorf("error parsing Postgres secret JSON: %w", err)
+	}
+	if err := validatePostgresSecret(pgValues); err != nil {
+		return postgresSecret{}, err
+	}
+	return pgValues, nil
+}
+
+func validatePostgresSecret(secret postgresSecret) error {
+	if secret.Username == "" || secret.Password == "" || secret.Engine == "" || secret.Host == "" || secret.DBInstanceIdentifier == "" {
+		return fmt.Errorf("postgres secret missing required fields")
+	}
+	if secret.Port <= 0 {
+		return fmt.Errorf("postgres secret has invalid port: %d", secret.Port)
+	}
+	return nil
+}
+
+func loadProdSecrets() error {
+	jwtSecrets, err := loadSecretMap(secretJWT)
+	if err != nil {
+		return fmt.Errorf("error retrieving JWT secret: %w", err)
+	}
+	if err := setEnvFromMap(jwtSecrets); err != nil {
+		return err
+	}
+
+	pgValues, err := loadPostgresSecret()
+	if err != nil {
+		return err
+	}
+	if err := setEnv("DB_USERNAME", pgValues.Username); err != nil {
+		return err
+	}
+	if err := setEnv("DB_PASSWORD", pgValues.Password); err != nil {
+		return err
+	}
+	if err := setEnv("DB_ENGINE", pgValues.Engine); err != nil {
+		return err
+	}
+	if err := setEnv("DB_HOST", pgValues.Host); err != nil {
+		return err
+	}
+	if err := setEnv("DB_PORT", fmt.Sprintf("%d", pgValues.Port)); err != nil {
+		return err
+	}
+	if err := setEnv("DB_INSTANCE_IDENTIFIER", pgValues.DBInstanceIdentifier); err != nil {
+		return err
+	}
+
+	valkeySecrets, err := loadSecretMap(secretValkey)
+	if err == nil {
+		if err := setEnvFromMap(valkeySecrets); err != nil {
+			return err
+		}
+	} else {
+		log.Printf("Valkey secrets not loaded: %v", err)
+	}
+	return nil
+}
+
+func resolveAppEnv() string {
+	appEnv := os.Getenv("APP_ENV")
+	if appEnv == "" {
+		return defaultAppEnv
+	}
+	return appEnv
+}
+
+func buildCORSHandler(cfg config.Config, router http.Handler) http.Handler {
+	corsOpts := []gorillaHandlers.CORSOption{
+		gorillaHandlers.AllowedOrigins(cfg.CORS.AllowedOrigins),
+		gorillaHandlers.AllowedMethods([]string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}),
+		gorillaHandlers.AllowedHeaders([]string{"Content-Type", "Authorization", "X-Requested-With"}),
+		gorillaHandlers.AllowCredentials(),
+	}
+
+	return gorillaHandlers.CORS(corsOpts...)(router)
 }
 
 func main() {
@@ -84,10 +171,7 @@ func run() error {
 	if err := loadEnv(); err != nil {
 		log.Println("No .env file found; using system environment variables")
 	}
-	appEnv := os.Getenv("APP_ENV")
-	if appEnv == "" {
-		appEnv = "dev"
-	}
+	appEnv := resolveAppEnv()
 	log.Println("Environment:", appEnv)
 
 	if appEnv == "prod" {
@@ -114,18 +198,11 @@ func run() error {
 	authHandler := handlers.NewAuthHandler(cfg, valkeyStore)
 	router := setupRoutes(cfg, authHandler)
 
-	corsOpts := []gorillaHandlers.CORSOption{
-		gorillaHandlers.AllowedOrigins(cfg.CORS.AllowedOrigins),
-		gorillaHandlers.AllowedMethods([]string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}),
-		gorillaHandlers.AllowedHeaders([]string{"Content-Type", "Authorization", "X-Requested-With"}),
-		gorillaHandlers.AllowCredentials(),
-	}
-
-	corsHandler := gorillaHandlers.CORS(corsOpts...)(router)
+	corsHandler := buildCORSHandler(cfg, router)
 
 	port := cfg.Port
 	if port == "" {
-		port = "8080"
+		port = defaultPort
 	}
 
 	log.Printf("Starting server on port %s in %s environment (CORS: %s)", port, cfg.AppEnv, strings.Join(cfg.CORS.AllowedOrigins, ","))
