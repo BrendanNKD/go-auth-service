@@ -15,15 +15,13 @@ func TestRefreshHandlerErrors(t *testing.T) {
 	cfg := configForTests()
 	handler := NewAuthHandler(cfg, &configurableTokenStore{})
 
-	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/refresh", nil)
-	handler.RefreshHandler(rec, req)
+	rec := executeRequest(handler.RefreshHandler, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
-	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/refresh", nil)
 	req.AddCookie(&http.Cookie{Name: cfg.Auth.RefreshCookieName, Value: "invalid"})
-	handler.RefreshHandler(rec, req)
+	rec = executeRequest(handler.RefreshHandler, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
 	claims := utils.Claims{Username: "user", Role: "role"}
@@ -32,17 +30,15 @@ func TestRefreshHandlerErrors(t *testing.T) {
 	assert.NoError(t, err)
 
 	handler = NewAuthHandler(cfg, &configurableTokenStore{exists: false})
-	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/refresh", nil)
 	req.AddCookie(&http.Cookie{Name: cfg.Auth.RefreshCookieName, Value: validToken})
-	handler.RefreshHandler(rec, req)
+	rec = executeRequest(handler.RefreshHandler, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
 	handler = NewAuthHandler(cfg, &configurableTokenStore{exists: true, revokeErr: assert.AnError})
-	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/refresh", nil)
 	req.AddCookie(&http.Cookie{Name: cfg.Auth.RefreshCookieName, Value: validToken})
-	handler.RefreshHandler(rec, req)
+	rec = executeRequest(handler.RefreshHandler, req)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
@@ -50,9 +46,8 @@ func TestLogoutHandlerInvalidToken(t *testing.T) {
 	cfg := configForTests()
 	handler := NewAuthHandler(cfg, &configurableTokenStore{})
 
-	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
 	req.AddCookie(&http.Cookie{Name: cfg.Auth.RefreshCookieName, Value: "invalid"})
-	handler.LogoutHandler(rec, req)
+	rec := executeRequest(handler.LogoutHandler, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 }

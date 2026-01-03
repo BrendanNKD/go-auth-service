@@ -72,6 +72,12 @@ func testConfig() config.Config {
 	}
 }
 
+func executeRequest(handler middleware.AppHandler, req *http.Request) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	middleware.ErrorHandler(handler).ServeHTTP(rec, req)
+	return rec
+}
+
 func TestRegisterHandler(t *testing.T) {
 	mock, cleanup := setupMockDB()
 	defer cleanup()
@@ -86,18 +92,14 @@ func TestRegisterHandler(t *testing.T) {
 	assert.NoError(t, err)
 
 	req := httptest.NewRequest("POST", "/register", bytes.NewBuffer(body))
-	rec := httptest.NewRecorder()
-
-	handler.RegisterHandler(rec, req)
+	rec := executeRequest(handler.RegisterHandler, req)
 	assert.Equal(t, http.StatusCreated, rec.Code)
 }
 
 func TestRegisterHandler_InvalidJSON(t *testing.T) {
 	handler := handlers.NewAuthHandler(testConfig(), newStubTokenStore())
 	req := httptest.NewRequest("POST", "/register", bytes.NewBufferString("{invalid-json"))
-	rec := httptest.NewRecorder()
-
-	handler.RegisterHandler(rec, req)
+	rec := executeRequest(handler.RegisterHandler, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
@@ -118,9 +120,7 @@ func TestLoginHandler(t *testing.T) {
 	user := models.Users{Username: "testuser", Password: "password"}
 	body, _ := json.Marshal(user)
 	req := httptest.NewRequest("POST", "/login", bytes.NewBuffer(body))
-	rec := httptest.NewRecorder()
-
-	handler.LoginHandler(rec, req)
+	rec := executeRequest(handler.LoginHandler, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	cookies := rec.Result().Cookies()
 	assert.NotEmpty(t, cookies)
@@ -140,9 +140,7 @@ func TestLoginHandler_WrongPassword(t *testing.T) {
 	user := models.Users{Username: "testuser", Password: "password"}
 	body, _ := json.Marshal(user)
 	req := httptest.NewRequest("POST", "/login", bytes.NewBuffer(body))
-	rec := httptest.NewRecorder()
-
-	handler.LoginHandler(rec, req)
+	rec := executeRequest(handler.LoginHandler, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
@@ -164,8 +162,7 @@ func TestRefreshHandler(t *testing.T) {
 
 	loginBody, _ := json.Marshal(models.Users{Username: "testuser", Password: "password"})
 	loginReq := httptest.NewRequest("POST", "/login", bytes.NewBuffer(loginBody))
-	loginRec := httptest.NewRecorder()
-	handler.LoginHandler(loginRec, loginReq)
+	loginRec := executeRequest(handler.LoginHandler, loginReq)
 	assert.Equal(t, http.StatusOK, loginRec.Code)
 
 	var refreshCookie *http.Cookie
@@ -178,9 +175,7 @@ func TestRefreshHandler(t *testing.T) {
 	if assert.NotNil(t, refreshCookie) {
 		refreshReq := httptest.NewRequest("POST", "/refresh", nil)
 		refreshReq.AddCookie(refreshCookie)
-		refreshRec := httptest.NewRecorder()
-
-		handler.RefreshHandler(refreshRec, refreshReq)
+		refreshRec := executeRequest(handler.RefreshHandler, refreshReq)
 		assert.Equal(t, http.StatusOK, refreshRec.Code)
 	}
 }
@@ -188,23 +183,18 @@ func TestRefreshHandler(t *testing.T) {
 func TestAuthenticateHandler(t *testing.T) {
 	handler := handlers.NewAuthHandler(testConfig(), newStubTokenStore())
 	req := httptest.NewRequest("GET", "/authenticate", nil)
-	rec := httptest.NewRecorder()
-
-	handler.AuthenticateHandler(rec, req)
+	rec := executeRequest(handler.AuthenticateHandler, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
 	claims := &utils.Claims{Username: "testuser", Role: "admin"}
 	req = req.WithContext(middleware.ContextWithClaims(req.Context(), claims))
-	rec = httptest.NewRecorder()
-	handler.AuthenticateHandler(rec, req)
+	rec = executeRequest(handler.AuthenticateHandler, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestLogoutHandler(t *testing.T) {
 	handler := handlers.NewAuthHandler(testConfig(), newStubTokenStore())
 	req := httptest.NewRequest("POST", "/logout", nil)
-	rec := httptest.NewRecorder()
-
-	handler.LogoutHandler(rec, req)
+	rec := executeRequest(handler.LogoutHandler, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 }

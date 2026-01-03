@@ -13,6 +13,7 @@ import (
 
 	"auth-service/config"
 	"auth-service/db"
+	"auth-service/middleware"
 	"auth-service/models"
 	"auth-service/utils"
 
@@ -68,18 +69,22 @@ func setupMockDB(t *testing.T) (sqlmock.Sqlmock, func()) {
 	return mock, func() { mockDB.Close() }
 }
 
+func executeRequest(handler func(http.ResponseWriter, *http.Request) error, req *http.Request) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	middleware.ErrorHandler(handler).ServeHTTP(rec, req)
+	return rec
+}
+
 func TestRegisterHandlerValidationErrors(t *testing.T) {
 	handler := NewAuthHandler(configForTests(), &configurableTokenStore{})
 
 	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewBufferString("{"))
-	rec := httptest.NewRecorder()
-	handler.RegisterHandler(rec, req)
+	rec := executeRequest(handler.RegisterHandler, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
 	body, _ := json.Marshal(models.Users{Username: "", Password: ""})
 	req = httptest.NewRequest(http.MethodPost, "/register", bytes.NewBuffer(body))
-	rec = httptest.NewRecorder()
-	handler.RegisterHandler(rec, req)
+	rec = executeRequest(handler.RegisterHandler, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
@@ -95,10 +100,9 @@ func TestRegisterHandlerHashError(t *testing.T) {
 
 	body, _ := json.Marshal(models.Users{Username: "user", Password: "pass"})
 	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewBuffer(body))
-	rec := httptest.NewRecorder()
 
 	handler := NewAuthHandler(configForTests(), &configurableTokenStore{})
-	handler.RegisterHandler(rec, req)
+	rec := executeRequest(handler.RegisterHandler, req)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
@@ -113,10 +117,9 @@ func TestRegisterHandlerDBError(t *testing.T) {
 
 	body, _ := json.Marshal(models.Users{Username: "user", Password: "pass"})
 	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewBuffer(body))
-	rec := httptest.NewRecorder()
 
 	handler := NewAuthHandler(configForTests(), &configurableTokenStore{})
-	handler.RegisterHandler(rec, req)
+	rec := executeRequest(handler.RegisterHandler, req)
 	assert.Equal(t, http.StatusConflict, rec.Code)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
@@ -131,21 +134,18 @@ func TestLoginHandlerErrors(t *testing.T) {
 
 	body, _ := json.Marshal(models.Users{Username: "missing", Password: "pass"})
 	req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewBuffer(body))
-	rec := httptest.NewRecorder()
 
 	handler := NewAuthHandler(configForTests(), &configurableTokenStore{})
-	handler.LoginHandler(rec, req)
+	rec := executeRequest(handler.LoginHandler, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
 	body, _ = json.Marshal(models.Users{})
 	req = httptest.NewRequest(http.MethodPost, "/login", bytes.NewBuffer(body))
-	rec = httptest.NewRecorder()
-	handler.LoginHandler(rec, req)
+	rec = executeRequest(handler.LoginHandler, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
 	req = httptest.NewRequest(http.MethodPost, "/login", bytes.NewBufferString("{"))
-	rec = httptest.NewRecorder()
-	handler.LoginHandler(rec, req)
+	rec = executeRequest(handler.LoginHandler, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
 	mock.ExpectQuery(`SELECT password, role FROM users WHERE username = \$1`).
@@ -154,8 +154,7 @@ func TestLoginHandlerErrors(t *testing.T) {
 
 	body, _ = json.Marshal(models.Users{Username: "error", Password: "pass"})
 	req = httptest.NewRequest(http.MethodPost, "/login", bytes.NewBuffer(body))
-	rec = httptest.NewRecorder()
-	handler.LoginHandler(rec, req)
+	rec = executeRequest(handler.LoginHandler, req)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 
 	assert.NoError(t, mock.ExpectationsWereMet())
@@ -177,10 +176,8 @@ func TestLoginHandlerCompareError(t *testing.T) {
 
 	body, _ := json.Marshal(models.Users{Username: "user", Password: "pass"})
 	req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewBuffer(body))
-	rec := httptest.NewRecorder()
-
 	handler := NewAuthHandler(configForTests(), &configurableTokenStore{})
-	handler.LoginHandler(rec, req)
+	rec := executeRequest(handler.LoginHandler, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
 	assert.NoError(t, mock.ExpectationsWereMet())
