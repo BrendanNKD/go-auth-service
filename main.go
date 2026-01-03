@@ -18,8 +18,19 @@ import (
 	"github.com/joho/godotenv"
 )
 
+var (
+	loadEnv        = godotenv.Load
+	loadConfig     = config.Load
+	connectDB      = db.Connect
+	newValkeyStore = store.NewValkeyStore
+	setupRoutes    = routes.SetupRoutes
+	listenAndServe = http.ListenAndServe
+	getSecret      = secretmanager.GetSecret
+	logFatal       = log.Fatal
+)
+
 func loadSecretMap(secretName string) (map[string]string, error) {
-	secretJSON, err := secretmanager.GetSecret(secretName)
+	secretJSON, err := getSecret(secretName)
 	if err != nil {
 		return nil, err
 	}
@@ -30,22 +41,22 @@ func loadSecretMap(secretName string) (map[string]string, error) {
 	return secrets, nil
 }
 
-func loadProdSecrets() {
+func loadProdSecrets() error {
 	jwtSecrets, err := loadSecretMap("prod/jwt")
 	if err != nil {
-		log.Fatalf("Error retrieving JWT secret: %v", err)
+		return fmt.Errorf("error retrieving JWT secret: %w", err)
 	}
 	for key, value := range jwtSecrets {
 		os.Setenv(key, value)
 	}
 
-	pgSecrets, err := secretmanager.GetSecret("prod/postgres")
+	pgSecrets, err := getSecret("prod/postgres")
 	if err != nil {
-		log.Fatalf("Error retrieving Postgres secret: %v", err)
+		return fmt.Errorf("error retrieving Postgres secret: %w", err)
 	}
 	var pgValues map[string]interface{}
 	if err := json.Unmarshal([]byte(pgSecrets), &pgValues); err != nil {
-		log.Fatalf("Error parsing Postgres secret JSON: %v", err)
+		return fmt.Errorf("error parsing Postgres secret JSON: %w", err)
 	}
 	os.Setenv("DB_USERNAME", pgValues["username"].(string))
 	os.Setenv("DB_PASSWORD", pgValues["password"].(string))
@@ -60,13 +71,19 @@ func loadProdSecrets() {
 			os.Setenv(key, value)
 		}
 	}
+	return nil
 }
 
 func main() {
-	if err := godotenv.Load(); err != nil {
+	if err := run(); err != nil {
+		logFatal(err)
+	}
+}
+
+func run() error {
+	if err := loadEnv(); err != nil {
 		log.Println("No .env file found; using system environment variables")
 	}
-
 	appEnv := os.Getenv("APP_ENV")
 	if appEnv == "" {
 		appEnv = "dev"
@@ -74,24 +91,28 @@ func main() {
 	log.Println("Environment:", appEnv)
 
 	if appEnv == "prod" {
-		loadProdSecrets()
+		if err := loadProdSecrets(); err != nil {
+			return err
+		}
 	}
 
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
-		log.Fatalf("Configuration error: %v", err)
+		return fmt.Errorf("configuration error: %w", err)
 	}
 
-	db.Connect(cfg.DB)
+	if err := connectDB(cfg.DB); err != nil {
+		return err
+	}
 
-	valkeyStore, err := store.NewValkeyStore(cfg.Valkey)
+	valkeyStore, err := newValkeyStore(cfg.Valkey)
 	if err != nil {
-		log.Fatalf("Valkey connection error: %v", err)
+		return fmt.Errorf("valkey connection error: %w", err)
 	}
 	defer valkeyStore.Close()
 
 	authHandler := handlers.NewAuthHandler(cfg, valkeyStore)
-	router := routes.SetupRoutes(cfg, authHandler)
+	router := setupRoutes(cfg, authHandler)
 
 	corsOpts := []gorillaHandlers.CORSOption{
 		gorillaHandlers.AllowedOrigins(cfg.CORS.AllowedOrigins),
@@ -108,5 +129,5 @@ func main() {
 	}
 
 	log.Printf("Starting server on port %s in %s environment (CORS: %s)", port, cfg.AppEnv, strings.Join(cfg.CORS.AllowedOrigins, ","))
-	log.Fatal(http.ListenAndServe(":"+port, corsHandler))
+	return listenAndServe(":"+port, corsHandler)
 }

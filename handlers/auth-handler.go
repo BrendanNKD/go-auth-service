@@ -21,6 +21,13 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+var (
+	generateFromPassword   = bcrypt.GenerateFromPassword
+	compareHashAndPassword = bcrypt.CompareHashAndPassword
+	randRead               = rand.Read
+	generateToken          = utils.GenerateToken
+)
+
 type JSONResponse map[string]interface{}
 
 type AuthHandler struct {
@@ -45,7 +52,7 @@ func (h *AuthHandler) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
+	hashedPassword, err := generateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	if err != nil {
 		log.Printf("Error hashing password: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -89,7 +96,7 @@ func (h *AuthHandler) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(storedPassword), []byte(user.Password)); err != nil {
+	if err := compareHashAndPassword([]byte(storedPassword), []byte(user.Password)); err != nil {
 		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
 		return
 	}
@@ -170,7 +177,7 @@ func (h *AuthHandler) issueTokens(ctx context.Context, w http.ResponseWriter, us
 		Role:     role,
 	}
 
-	accessToken, err := utils.GenerateToken(accessClaims, h.cfg.Auth.AccessTokenTTL, h.cfg.Auth.Issuer, h.cfg.Auth.AccessTokenSecret)
+	accessToken, err := generateToken(accessClaims, h.cfg.Auth.AccessTokenTTL, h.cfg.Auth.Issuer, h.cfg.Auth.AccessTokenSecret)
 	if err != nil {
 		return err
 	}
@@ -185,7 +192,7 @@ func (h *AuthHandler) issueTokens(ctx context.Context, w http.ResponseWriter, us
 	}
 	refreshClaims.ID = refreshID
 
-	refreshToken, err := utils.GenerateToken(refreshClaims, h.cfg.Auth.RefreshTokenTTL, h.cfg.Auth.Issuer, h.cfg.Auth.RefreshTokenSecret)
+	refreshToken, err := generateToken(refreshClaims, h.cfg.Auth.RefreshTokenTTL, h.cfg.Auth.Issuer, h.cfg.Auth.RefreshTokenSecret)
 	if err != nil {
 		return err
 	}
@@ -229,7 +236,7 @@ func (h *AuthHandler) rotateTokens(ctx context.Context, w http.ResponseWriter, c
 
 func newTokenID() (string, error) {
 	buffer := make([]byte, 32)
-	if _, err := rand.Read(buffer); err != nil {
+	if _, err := randRead(buffer); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(buffer), nil
