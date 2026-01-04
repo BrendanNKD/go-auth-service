@@ -89,12 +89,24 @@ func startValkeyServer(t *testing.T, handler func([]string) string) (string, fun
 }
 
 func TestValkeyStoreOperations(t *testing.T) {
+	metadataJSON := `{"session_id":"session","username":"user","role":"role","issued_at":"2024-01-01T00:00:00Z"}`
+	sessionJSON := `{"current_token_hash":"hash","username":"user","role":"role","issued_at":"2024-01-01T00:00:00Z"}`
 	addr, cleanup := startValkeyServer(t, func(args []string) string {
 		switch strings.ToUpper(args[0]) {
 		case "AUTH", "SELECT", "PING", "SET", "DEL":
 			return "+OK\r\n"
-		case "EXISTS":
-			return ":1\r\n"
+		case "GET":
+			key := args[1]
+			switch {
+			case strings.Contains(key, ":token:"):
+				return fmt.Sprintf("$%d\r\n%s\r\n", len(metadataJSON), metadataJSON)
+			case strings.Contains(key, ":session:"):
+				return fmt.Sprintf("$%d\r\n%s\r\n", len(sessionJSON), sessionJSON)
+			case strings.Contains(key, ":revoked:"):
+				return "$9\r\nsession-1\r\n"
+			default:
+				return "$-1\r\n"
+			}
 		default:
 			return "-ERR\r\n"
 		}
@@ -105,16 +117,43 @@ func TestValkeyStoreOperations(t *testing.T) {
 	store, err := NewValkeyStore(cfg)
 	assert.NoError(t, err)
 
-	err = store.Save(context.Background(), "token", "user", time.Second)
+	err = store.SaveToken(context.Background(), "token-hash", RefreshTokenMetadata{
+		SessionID: "session",
+		Username:  "user",
+		Role:      "role",
+		IssuedAt:  time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+	}, time.Second)
 	assert.NoError(t, err)
 
-	exists, err := store.Exists(context.Background(), "token")
+	_, found, err := store.GetToken(context.Background(), "token-hash")
 	assert.NoError(t, err)
-	assert.True(t, exists)
+	assert.True(t, found)
 
-	err = store.Revoke(context.Background(), "token")
+	err = store.SaveSession(context.Background(), "session-1", RefreshSession{
+		CurrentTokenHash: "hash",
+		Username:         "user",
+		Role:             "role",
+		IssuedAt:         time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+	}, time.Second)
 	assert.NoError(t, err)
-	assert.Equal(t, "prefix:token", store.key("token"))
+
+	_, found, err = store.GetSession(context.Background(), "session-1")
+	assert.NoError(t, err)
+	assert.True(t, found)
+
+	err = store.MarkRevoked(context.Background(), "token-hash", "session-1", time.Second)
+	assert.NoError(t, err)
+
+	sessionID, revoked, err := store.IsRevoked(context.Background(), "token-hash")
+	assert.NoError(t, err)
+	assert.True(t, revoked)
+	assert.Equal(t, "session-1", sessionID)
+
+	err = store.RevokeToken(context.Background(), "token-hash")
+	assert.NoError(t, err)
+
+	err = store.RevokeSession(context.Background(), "session-1")
+	assert.NoError(t, err)
 }
 
 func TestNewValkeyStoreNoAuth(t *testing.T) {
@@ -140,35 +179,23 @@ func TestNewValkeyStorePingError(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestValkeyStoreExistsInvalidResponse(t *testing.T) {
+func TestValkeyStoreGetTokenInvalidJSON(t *testing.T) {
 	addr, cleanup := startValkeyServer(t, func(args []string) string {
-		if strings.ToUpper(args[0]) == "EXISTS" {
-			return ":notint\r\n"
+		if strings.ToUpper(args[0]) == "GET" {
+			return "$7\r\ninvalid\r\n"
 		}
 		return "+OK\r\n"
 	})
 	defer cleanup()
 
 	store := &ValkeyStore{addr: addr, prefix: "prefix"}
-	_, err := store.Exists(context.Background(), "token")
+	_, _, err := store.GetToken(context.Background(), "token")
 	assert.Error(t, err)
 }
 
-func TestValkeyStoreExistsUnexpectedResponse(t *testing.T) {
-	originalDial := dialContext
-	dialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		return &stubConn{readData: []byte(":notint\r\n")}, nil
-	}
-	defer func() { dialContext = originalDial }()
-
-	store := &ValkeyStore{addr: "ignored"}
-	_, err := store.Exists(context.Background(), "token")
-	assert.Error(t, err)
-}
-
-func TestValkeyStoreExistsDoError(t *testing.T) {
+func TestValkeyStoreGetTokenDoError(t *testing.T) {
 	store := &ValkeyStore{addr: "127.0.0.1:1"}
-	_, err := store.Exists(context.Background(), "token")
+	_, _, err := store.GetToken(context.Background(), "token")
 	assert.Error(t, err)
 }
 

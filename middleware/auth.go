@@ -22,7 +22,7 @@ func AuthMiddleware(cfg config.Config) func(http.Handler) http.Handler {
 				return
 			}
 
-			claims, err := utils.ParseToken(token, cfg.Auth.AccessTokenSecret)
+			claims, err := utils.ParseAccessToken(token, cfg.Auth.AccessTokenPublicKey)
 			if err != nil {
 				http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
 				return

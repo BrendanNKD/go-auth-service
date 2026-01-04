@@ -3,6 +3,8 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -15,6 +17,7 @@ import (
 	"auth-service/db"
 	"auth-service/middleware"
 	"auth-service/models"
+	"auth-service/store"
 	"auth-service/utils"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -22,22 +25,52 @@ import (
 )
 
 type configurableTokenStore struct {
-	saveErr   error
-	exists    bool
-	existsErr error
-	revokeErr error
+	saveTokenErr     error
+	saveSessionErr   error
+	getToken         store.RefreshTokenMetadata
+	getTokenFound    bool
+	getTokenErr      error
+	getSession       store.RefreshSession
+	getSessionFound  bool
+	getSessionErr    error
+	revokeTokenErr   error
+	revokeSessionErr error
+	markRevokedErr   error
+	isRevoked        bool
+	isRevokedID      string
+	isRevokedErr     error
 }
 
-func (s *configurableTokenStore) Save(ctx context.Context, tokenID, username string, ttl time.Duration) error {
-	return s.saveErr
+func (s *configurableTokenStore) SaveToken(ctx context.Context, tokenHash string, metadata store.RefreshTokenMetadata, ttl time.Duration) error {
+	return s.saveTokenErr
 }
 
-func (s *configurableTokenStore) Exists(ctx context.Context, tokenID string) (bool, error) {
-	return s.exists, s.existsErr
+func (s *configurableTokenStore) GetToken(ctx context.Context, tokenHash string) (store.RefreshTokenMetadata, bool, error) {
+	return s.getToken, s.getTokenFound, s.getTokenErr
 }
 
-func (s *configurableTokenStore) Revoke(ctx context.Context, tokenID string) error {
-	return s.revokeErr
+func (s *configurableTokenStore) RevokeToken(ctx context.Context, tokenHash string) error {
+	return s.revokeTokenErr
+}
+
+func (s *configurableTokenStore) SaveSession(ctx context.Context, sessionID string, session store.RefreshSession, ttl time.Duration) error {
+	return s.saveSessionErr
+}
+
+func (s *configurableTokenStore) GetSession(ctx context.Context, sessionID string) (store.RefreshSession, bool, error) {
+	return s.getSession, s.getSessionFound, s.getSessionErr
+}
+
+func (s *configurableTokenStore) RevokeSession(ctx context.Context, sessionID string) error {
+	return s.revokeSessionErr
+}
+
+func (s *configurableTokenStore) MarkRevoked(ctx context.Context, tokenHash, sessionID string, ttl time.Duration) error {
+	return s.markRevokedErr
+}
+
+func (s *configurableTokenStore) IsRevoked(ctx context.Context, tokenHash string) (string, bool, error) {
+	return s.isRevokedID, s.isRevoked, s.isRevokedErr
 }
 
 func (s *configurableTokenStore) Close() error {
@@ -45,15 +78,20 @@ func (s *configurableTokenStore) Close() error {
 }
 
 func configForTests() config.Config {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		panic(err)
+	}
 	return config.Config{
 		Auth: config.AuthConfig{
-			AccessTokenSecret:  []byte("access-secret"),
-			RefreshTokenSecret: []byte("refresh-secret"),
-			Issuer:             "issuer",
-			AccessTokenTTL:     time.Minute,
-			RefreshTokenTTL:    time.Hour,
-			AccessCookieName:   "access",
-			RefreshCookieName:  "refresh",
+			AccessTokenPrivateKey: privateKey,
+			AccessTokenPublicKey:  &privateKey.PublicKey,
+			AccessTokenKeyID:      "kid",
+			Issuer:                "issuer",
+			AccessTokenTTL:        time.Minute,
+			RefreshTokenTTL:       time.Hour,
+			AccessCookieName:      "access",
+			RefreshCookieName:     "refresh",
 		},
 		Cookie: config.CookieConfig{
 			Path:     "/",
@@ -191,39 +229,38 @@ func TestIssueTokensErrors(t *testing.T) {
 	_, err := handler.issueTokens(context.Background(), httptest.NewRecorder(), "user", "role")
 	assert.Error(t, err)
 
-	store := &configurableTokenStore{saveErr: errors.New("save error")}
+	store := &configurableTokenStore{saveTokenErr: errors.New("save error")}
 	handler = NewAuthHandler(configForTests(), store)
 	_, err = handler.issueTokens(context.Background(), httptest.NewRecorder(), "user", "role")
 	assert.Error(t, err)
 
-	originalRand := randRead
-	randRead = func(b []byte) (int, error) {
-		return 0, errors.New("rand error")
-	}
-
-	handler = NewAuthHandler(configForTests(), &configurableTokenStore{})
-	_, err = handler.issueTokens(context.Background(), httptest.NewRecorder(), "user", "role")
-	assert.Error(t, err)
-	randRead = originalRand
-
-	originalGenerateToken := generateToken
-	generateToken = func(claims utils.Claims, ttl time.Duration, issuer string, secret []byte) (string, error) {
+	originalGenerateToken := generateAccessToken
+	generateAccessToken = func(claims utils.Claims, ttl time.Duration, issuer, keyID string, privateKey *rsa.PrivateKey) (string, error) {
 		return "", errors.New("token error")
 	}
-	defer func() { generateToken = originalGenerateToken }()
+	defer func() { generateAccessToken = originalGenerateToken }()
 
 	handler = NewAuthHandler(configForTests(), &configurableTokenStore{})
 	_, err = handler.issueTokens(context.Background(), httptest.NewRecorder(), "user", "role")
 	assert.Error(t, err)
 
 	call := 0
-	generateToken = func(claims utils.Claims, ttl time.Duration, issuer string, secret []byte) (string, error) {
+	generateAccessToken = func(claims utils.Claims, ttl time.Duration, issuer, keyID string, privateKey *rsa.PrivateKey) (string, error) {
 		call++
-		if call == 2 {
-			return "", errors.New("refresh token error")
-		}
 		return "token", nil
 	}
+	originalGenerateRefresh := generateRefreshToken
+	generateRefreshToken = func() (string, error) {
+		if call == 1 {
+			return "", errors.New("refresh token error")
+		}
+		return "refresh-token", nil
+	}
+	defer func() {
+		generateAccessToken = originalGenerateToken
+		generateRefreshToken = originalGenerateRefresh
+	}()
+
 	handler = NewAuthHandler(configForTests(), &configurableTokenStore{})
 	_, err = handler.issueTokens(context.Background(), httptest.NewRecorder(), "user", "role")
 	assert.Error(t, err)
@@ -231,32 +268,39 @@ func TestIssueTokensErrors(t *testing.T) {
 
 func TestValidateRefreshToken(t *testing.T) {
 	handler := NewAuthHandler(configForTests(), nil)
-	assert.Error(t, handler.validateRefreshToken(context.Background(), "token"))
+	_, err := handler.validateRefreshToken(context.Background(), "token")
+	assert.Error(t, err)
 
 	handler = NewAuthHandler(configForTests(), &configurableTokenStore{})
-	assert.Error(t, handler.validateRefreshToken(context.Background(), ""))
+	_, err = handler.validateRefreshToken(context.Background(), "")
+	assert.Error(t, err)
 
-	handler = NewAuthHandler(configForTests(), &configurableTokenStore{exists: false})
-	assert.Error(t, handler.validateRefreshToken(context.Background(), "token"))
+	handler = NewAuthHandler(configForTests(), &configurableTokenStore{getTokenFound: false})
+	_, err = handler.validateRefreshToken(context.Background(), "token")
+	assert.Error(t, err)
 
-	handler = NewAuthHandler(configForTests(), &configurableTokenStore{existsErr: errors.New("exists error")})
-	assert.Error(t, handler.validateRefreshToken(context.Background(), "token"))
+	handler = NewAuthHandler(configForTests(), &configurableTokenStore{getTokenErr: errors.New("get error")})
+	_, err = handler.validateRefreshToken(context.Background(), "token")
+	assert.Error(t, err)
 
-	handler = NewAuthHandler(configForTests(), &configurableTokenStore{exists: true})
-	assert.NoError(t, handler.validateRefreshToken(context.Background(), "token"))
+	handler = NewAuthHandler(configForTests(), &configurableTokenStore{
+		getTokenFound:   true,
+		getSessionFound: true,
+		getSession: store.RefreshSession{
+			CurrentTokenHash: "token",
+		},
+	})
+	_, err = handler.validateRefreshToken(context.Background(), "token")
+	assert.NoError(t, err)
 }
 
 func TestRotateTokens(t *testing.T) {
-	handler := NewAuthHandler(configForTests(), &configurableTokenStore{revokeErr: errors.New("revoke error")})
-	claims := &utils.Claims{}
-	claims.ID = "id"
-	_, err := handler.rotateTokens(context.Background(), httptest.NewRecorder(), claims)
+	handler := NewAuthHandler(configForTests(), &configurableTokenStore{revokeTokenErr: errors.New("revoke error")})
+	_, err := handler.rotateTokens(context.Background(), httptest.NewRecorder(), store.RefreshTokenMetadata{SessionID: "id"}, "hash")
 	assert.Error(t, err)
 
-	handler = NewAuthHandler(configForTests(), &configurableTokenStore{exists: true})
-	claims = &utils.Claims{Username: "user", Role: "role"}
-	claims.ID = "id"
-	_, err = handler.rotateTokens(context.Background(), httptest.NewRecorder(), claims)
+	handler = NewAuthHandler(configForTests(), &configurableTokenStore{})
+	_, err = handler.rotateTokens(context.Background(), httptest.NewRecorder(), store.RefreshTokenMetadata{SessionID: "id", Username: "user", Role: "role"}, "hash")
 	assert.NoError(t, err)
 }
 

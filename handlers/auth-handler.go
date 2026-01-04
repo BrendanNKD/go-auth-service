@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -26,7 +27,8 @@ var (
 	generateFromPassword   = bcrypt.GenerateFromPassword
 	compareHashAndPassword = bcrypt.CompareHashAndPassword
 	randRead               = rand.Read
-	generateToken          = utils.GenerateToken
+	generateAccessToken    = utils.GenerateAccessToken
+	generateRefreshToken   = utils.GenerateRefreshToken
 )
 
 type JSONResponse map[string]interface{}
@@ -149,16 +151,13 @@ func (h *AuthHandler) RefreshHandler(w http.ResponseWriter, r *http.Request) err
 		return middleware.NewAppError(http.StatusUnauthorized, "Refresh token is required", err)
 	}
 
-	claims, err := utils.ParseToken(refreshToken, h.cfg.Auth.RefreshTokenSecret)
+	refreshHash := utils.HashRefreshToken(refreshToken)
+	metadata, err := h.validateRefreshToken(r.Context(), refreshHash)
 	if err != nil {
-		return middleware.NewAppError(http.StatusUnauthorized, "Invalid refresh token", err)
-	}
-
-	if err := h.validateRefreshToken(r.Context(), claims.ID); err != nil {
 		return middleware.NewAppError(http.StatusUnauthorized, "Refresh token revoked", err)
 	}
 
-	accessToken, err := h.rotateTokens(r.Context(), w, claims)
+	accessToken, err := h.rotateTokens(r.Context(), w, metadata, refreshHash)
 	if err != nil {
 		log.Printf("Error rotating tokens: %v", err)
 		return middleware.NewAppError(http.StatusInternalServerError, "Could not refresh token", err)
@@ -178,8 +177,16 @@ func (h *AuthHandler) LogoutHandler(w http.ResponseWriter, r *http.Request) erro
 
 	refreshToken, err := readCookie(r, h.cfg.Auth.RefreshCookieName)
 	if err == nil {
-		if claims, parseErr := utils.ParseToken(refreshToken, h.cfg.Auth.RefreshTokenSecret); parseErr == nil {
-			_ = h.tokenStore.Revoke(r.Context(), claims.ID)
+		refreshHash := utils.HashRefreshToken(refreshToken)
+		if h.tokenStore != nil {
+			if metadata, found, err := h.tokenStore.GetToken(r.Context(), refreshHash); err == nil && found {
+				_ = h.tokenStore.RevokeToken(r.Context(), refreshHash)
+				_ = h.tokenStore.MarkRevoked(r.Context(), refreshHash, metadata.SessionID, h.cfg.Auth.RefreshTokenTTL)
+				_ = h.tokenStore.RevokeSession(r.Context(), metadata.SessionID)
+			}
+			if sessionID, revoked, err := h.tokenStore.IsRevoked(r.Context(), refreshHash); err == nil && revoked {
+				h.revokeSession(r.Context(), sessionID)
+			}
 		}
 	}
 
@@ -197,30 +204,42 @@ func (h *AuthHandler) issueTokens(ctx context.Context, w http.ResponseWriter, us
 		Role:     role,
 	}
 
-	accessToken, err := generateToken(accessClaims, h.cfg.Auth.AccessTokenTTL, h.cfg.Auth.Issuer, h.cfg.Auth.AccessTokenSecret)
+	accessToken, err := generateAccessToken(accessClaims, h.cfg.Auth.AccessTokenTTL, h.cfg.Auth.Issuer, h.cfg.Auth.AccessTokenKeyID, h.cfg.Auth.AccessTokenPrivateKey)
 	if err != nil {
 		return "", err
 	}
 
-	refreshID, err := newTokenID()
+	sessionID, err := newTokenID()
 	if err != nil {
 		return "", err
 	}
-	refreshClaims := utils.Claims{
-		Username: username,
-		Role:     role,
-	}
-	refreshClaims.ID = refreshID
 
-	refreshToken, err := generateToken(refreshClaims, h.cfg.Auth.RefreshTokenTTL, h.cfg.Auth.Issuer, h.cfg.Auth.RefreshTokenSecret)
+	refreshToken, err := generateRefreshToken()
 	if err != nil {
 		return "", err
 	}
+	refreshHash := utils.HashRefreshToken(refreshToken)
+	issuedAt := time.Now().UTC()
 
 	if h.tokenStore == nil {
 		return "", fmt.Errorf("token store not configured")
 	}
-	if err := h.tokenStore.Save(ctx, refreshID, username, h.cfg.Auth.RefreshTokenTTL); err != nil {
+	metadata := store.RefreshTokenMetadata{
+		SessionID: sessionID,
+		Username:  username,
+		Role:      role,
+		IssuedAt:  issuedAt,
+	}
+	if err := h.tokenStore.SaveToken(ctx, refreshHash, metadata, h.cfg.Auth.RefreshTokenTTL); err != nil {
+		return "", err
+	}
+	session := store.RefreshSession{
+		CurrentTokenHash: refreshHash,
+		Username:         username,
+		Role:             role,
+		IssuedAt:         issuedAt,
+	}
+	if err := h.tokenStore.SaveSession(ctx, sessionID, session, h.cfg.Auth.RefreshTokenTTL); err != nil {
 		return "", err
 	}
 
@@ -229,29 +248,102 @@ func (h *AuthHandler) issueTokens(ctx context.Context, w http.ResponseWriter, us
 	return accessToken, nil
 }
 
-func (h *AuthHandler) validateRefreshToken(ctx context.Context, tokenID string) error {
+func (h *AuthHandler) validateRefreshToken(ctx context.Context, tokenHash string) (store.RefreshTokenMetadata, error) {
 	if h.tokenStore == nil {
-		return fmt.Errorf("token store not configured")
+		return store.RefreshTokenMetadata{}, fmt.Errorf("token store not configured")
 	}
-	if tokenID == "" {
-		return fmt.Errorf("missing refresh token id")
+	if tokenHash == "" {
+		return store.RefreshTokenMetadata{}, fmt.Errorf("missing refresh token hash")
 	}
 
-	exists, err := h.tokenStore.Exists(ctx, tokenID)
+	sessionID, revoked, err := h.tokenStore.IsRevoked(ctx, tokenHash)
 	if err != nil {
-		return err
+		return store.RefreshTokenMetadata{}, err
 	}
-	if !exists {
-		return fmt.Errorf("refresh token not found")
+	if revoked {
+		h.revokeSession(ctx, sessionID)
+		return store.RefreshTokenMetadata{}, errors.New("refresh token reused")
 	}
-	return nil
+
+	metadata, found, err := h.tokenStore.GetToken(ctx, tokenHash)
+	if err != nil {
+		return store.RefreshTokenMetadata{}, err
+	}
+	if !found {
+		return store.RefreshTokenMetadata{}, fmt.Errorf("refresh token not found")
+	}
+
+	session, found, err := h.tokenStore.GetSession(ctx, metadata.SessionID)
+	if err != nil {
+		return store.RefreshTokenMetadata{}, err
+	}
+	if !found {
+		return store.RefreshTokenMetadata{}, fmt.Errorf("refresh session not found")
+	}
+	if session.CurrentTokenHash != tokenHash {
+		h.revokeSession(ctx, metadata.SessionID)
+		return store.RefreshTokenMetadata{}, errors.New("refresh token reuse detected")
+	}
+	return metadata, nil
 }
 
-func (h *AuthHandler) rotateTokens(ctx context.Context, w http.ResponseWriter, claims *utils.Claims) (string, error) {
-	if err := h.tokenStore.Revoke(ctx, claims.ID); err != nil {
+func (h *AuthHandler) rotateTokens(ctx context.Context, w http.ResponseWriter, metadata store.RefreshTokenMetadata, tokenHash string) (string, error) {
+	if err := h.tokenStore.RevokeToken(ctx, tokenHash); err != nil {
 		return "", err
 	}
-	return h.issueTokens(ctx, w, claims.Username, claims.Role)
+	if err := h.tokenStore.MarkRevoked(ctx, tokenHash, metadata.SessionID, h.cfg.Auth.RefreshTokenTTL); err != nil {
+		return "", err
+	}
+
+	refreshToken, err := generateRefreshToken()
+	if err != nil {
+		return "", err
+	}
+	newHash := utils.HashRefreshToken(refreshToken)
+	issuedAt := time.Now().UTC()
+
+	accessClaims := utils.Claims{
+		Username: metadata.Username,
+		Role:     metadata.Role,
+	}
+	accessToken, err := generateAccessToken(accessClaims, h.cfg.Auth.AccessTokenTTL, h.cfg.Auth.Issuer, h.cfg.Auth.AccessTokenKeyID, h.cfg.Auth.AccessTokenPrivateKey)
+	if err != nil {
+		return "", err
+	}
+
+	newMetadata := store.RefreshTokenMetadata{
+		SessionID: metadata.SessionID,
+		Username:  metadata.Username,
+		Role:      metadata.Role,
+		IssuedAt:  issuedAt,
+	}
+	if err := h.tokenStore.SaveToken(ctx, newHash, newMetadata, h.cfg.Auth.RefreshTokenTTL); err != nil {
+		return "", err
+	}
+	session := store.RefreshSession{
+		CurrentTokenHash: newHash,
+		Username:         metadata.Username,
+		Role:             metadata.Role,
+		IssuedAt:         issuedAt,
+	}
+	if err := h.tokenStore.SaveSession(ctx, metadata.SessionID, session, h.cfg.Auth.RefreshTokenTTL); err != nil {
+		return "", err
+	}
+
+	setCookie(w, h.cfg, h.cfg.Auth.AccessCookieName, accessToken, h.cfg.Auth.AccessTokenTTL)
+	setCookie(w, h.cfg, h.cfg.Auth.RefreshCookieName, refreshToken, h.cfg.Auth.RefreshTokenTTL)
+	return accessToken, nil
+}
+
+func (h *AuthHandler) revokeSession(ctx context.Context, sessionID string) {
+	if h.tokenStore == nil || sessionID == "" {
+		return
+	}
+	session, found, err := h.tokenStore.GetSession(ctx, sessionID)
+	if err == nil && found {
+		_ = h.tokenStore.RevokeToken(ctx, session.CurrentTokenHash)
+	}
+	_ = h.tokenStore.RevokeSession(ctx, sessionID)
 }
 
 func newTokenID() (string, error) {

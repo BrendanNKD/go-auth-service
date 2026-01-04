@@ -1,6 +1,9 @@
 package config
 
 import (
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net/http"
@@ -31,13 +34,14 @@ type DatabaseConfig struct {
 }
 
 type AuthConfig struct {
-	AccessTokenSecret  []byte
-	RefreshTokenSecret []byte
-	Issuer             string
-	AccessTokenTTL     time.Duration
-	RefreshTokenTTL    time.Duration
-	AccessCookieName   string
-	RefreshCookieName  string
+	AccessTokenPrivateKey *rsa.PrivateKey
+	AccessTokenPublicKey  *rsa.PublicKey
+	AccessTokenKeyID      string
+	Issuer                string
+	AccessTokenTTL        time.Duration
+	RefreshTokenTTL       time.Duration
+	AccessCookieName      string
+	RefreshCookieName     string
 }
 
 type CookieConfig struct {
@@ -67,10 +71,10 @@ func Load() (Config, error) {
 		dbName = os.Getenv("DB_INSTANCE_IDENTIFIER")
 	}
 
-	accessSecret := os.Getenv("JWT_ACCESS_SECRET")
-	refreshSecret := os.Getenv("JWT_REFRESH_SECRET")
-	if accessSecret == "" || refreshSecret == "" {
-		return Config{}, errors.New("JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be set")
+	accessPrivateKeyPEM := os.Getenv("JWT_ACCESS_PRIVATE_KEY")
+	accessPublicKeyPEM := os.Getenv("JWT_ACCESS_PUBLIC_KEY")
+	if accessPrivateKeyPEM == "" {
+		return Config{}, errors.New("JWT_ACCESS_PRIVATE_KEY must be set")
 	}
 
 	accessTTL, err := time.ParseDuration(getEnv("JWT_ACCESS_TTL", "15m"))
@@ -104,6 +108,18 @@ func Load() (Config, error) {
 		}
 	}
 
+	privateKey, err := parseRSAPrivateKey(accessPrivateKeyPEM)
+	if err != nil {
+		return Config{}, err
+	}
+	publicKey := privateKey.Public().(*rsa.PublicKey)
+	if accessPublicKeyPEM != "" {
+		publicKey, err = parseRSAPublicKey(accessPublicKeyPEM)
+		if err != nil {
+			return Config{}, err
+		}
+	}
+
 	cfg := Config{
 		AppEnv: appEnv,
 		Port:   port,
@@ -117,13 +133,14 @@ func Load() (Config, error) {
 			SSLMode:  dbSSLMode,
 		},
 		Auth: AuthConfig{
-			AccessTokenSecret:  []byte(accessSecret),
-			RefreshTokenSecret: []byte(refreshSecret),
-			Issuer:             getEnv("JWT_ISSUER", "auth-service"),
-			AccessTokenTTL:     accessTTL,
-			RefreshTokenTTL:    refreshTTL,
-			AccessCookieName:   getEnv("AUTH_ACCESS_COOKIE_NAME", "access_token"),
-			RefreshCookieName:  getEnv("AUTH_REFRESH_COOKIE_NAME", "refresh_token"),
+			AccessTokenPrivateKey: privateKey,
+			AccessTokenPublicKey:  publicKey,
+			AccessTokenKeyID:      getEnv("JWT_ACCESS_KID", "auth-service-1"),
+			Issuer:                getEnv("JWT_ISSUER", "auth-service"),
+			AccessTokenTTL:        accessTTL,
+			RefreshTokenTTL:       refreshTTL,
+			AccessCookieName:      getEnv("AUTH_ACCESS_COOKIE_NAME", "access_token"),
+			RefreshCookieName:     getEnv("AUTH_REFRESH_COOKIE_NAME", "refresh_token"),
 		},
 		Cookie: CookieConfig{
 			Domain:   getEnv("COOKIE_DOMAIN", ""),
@@ -147,6 +164,42 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func parseRSAPrivateKey(pemValue string) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode([]byte(pemValue))
+	if block == nil {
+		return nil, errors.New("invalid JWT_ACCESS_PRIVATE_KEY PEM block")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err == nil {
+		privateKey, ok := parsed.(*rsa.PrivateKey)
+		if !ok {
+			return nil, errors.New("JWT_ACCESS_PRIVATE_KEY is not RSA")
+		}
+		return privateKey, nil
+	}
+	privateKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("invalid JWT_ACCESS_PRIVATE_KEY: %w", err)
+	}
+	return privateKey, nil
+}
+
+func parseRSAPublicKey(pemValue string) (*rsa.PublicKey, error) {
+	block, _ := pem.Decode([]byte(pemValue))
+	if block == nil {
+		return nil, errors.New("invalid JWT_ACCESS_PUBLIC_KEY PEM block")
+	}
+	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("invalid JWT_ACCESS_PUBLIC_KEY: %w", err)
+	}
+	publicKey, ok := parsed.(*rsa.PublicKey)
+	if !ok {
+		return nil, errors.New("JWT_ACCESS_PUBLIC_KEY is not RSA")
+	}
+	return publicKey, nil
 }
 
 func getEnv(key, fallback string) string {

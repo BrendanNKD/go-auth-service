@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"auth-service/models"
+	"auth-service/store"
 	"auth-service/utils"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -22,17 +23,37 @@ type trackingTokenStore struct {
 	revoked bool
 }
 
-func (s *trackingTokenStore) Save(ctx context.Context, tokenID, username string, ttl time.Duration) error {
+func (s *trackingTokenStore) SaveToken(ctx context.Context, tokenHash string, metadata store.RefreshTokenMetadata, ttl time.Duration) error {
 	return errors.New("save error")
 }
 
-func (s *trackingTokenStore) Exists(ctx context.Context, tokenID string) (bool, error) {
-	return true, nil
+func (s *trackingTokenStore) GetToken(ctx context.Context, tokenHash string) (store.RefreshTokenMetadata, bool, error) {
+	return store.RefreshTokenMetadata{SessionID: "session-id"}, true, nil
 }
 
-func (s *trackingTokenStore) Revoke(ctx context.Context, tokenID string) error {
+func (s *trackingTokenStore) RevokeToken(ctx context.Context, tokenHash string) error {
 	s.revoked = true
 	return nil
+}
+
+func (s *trackingTokenStore) SaveSession(ctx context.Context, sessionID string, session store.RefreshSession, ttl time.Duration) error {
+	return nil
+}
+
+func (s *trackingTokenStore) GetSession(ctx context.Context, sessionID string) (store.RefreshSession, bool, error) {
+	return store.RefreshSession{CurrentTokenHash: utils.HashRefreshToken("refresh-token")}, true, nil
+}
+
+func (s *trackingTokenStore) RevokeSession(ctx context.Context, sessionID string) error {
+	return nil
+}
+
+func (s *trackingTokenStore) MarkRevoked(ctx context.Context, tokenHash, sessionID string, ttl time.Duration) error {
+	return nil
+}
+
+func (s *trackingTokenStore) IsRevoked(ctx context.Context, tokenHash string) (string, bool, error) {
+	return "", false, nil
 }
 
 func (s *trackingTokenStore) Close() error {
@@ -66,10 +87,7 @@ func TestLogoutHandlerRevokesToken(t *testing.T) {
 	store := &trackingTokenStore{}
 	handler := NewAuthHandler(cfg, store)
 
-	claims := utils.Claims{Username: "user", Role: "role"}
-	claims.ID = "refresh-id"
-	token, err := utils.GenerateToken(claims, cfg.Auth.RefreshTokenTTL, cfg.Auth.Issuer, cfg.Auth.RefreshTokenSecret)
-	assert.NoError(t, err)
+	token := "refresh-token"
 
 	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
 	req.AddCookie(&http.Cookie{Name: cfg.Auth.RefreshCookieName, Value: token})

@@ -1,6 +1,8 @@
 package routes_test
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"net/http"
 	"testing"
 
@@ -13,10 +15,14 @@ import (
 )
 
 func TestSetupRoutes(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	assert.NoError(t, err)
 	cfg := config.Config{
 		Auth: config.AuthConfig{
-			AccessTokenSecret: []byte("test"),
-			AccessCookieName:  "access_token",
+			AccessTokenPrivateKey: privateKey,
+			AccessTokenPublicKey:  &privateKey.PublicKey,
+			AccessTokenKeyID:      "kid",
+			AccessCookieName:      "access_token",
 		},
 	}
 
@@ -32,6 +38,7 @@ func TestSetupRoutes(t *testing.T) {
 		{"POST", "/api/v1/auth/login"},
 		{"POST", "/api/v1/auth/logout"},
 		{"POST", "/api/v1/auth/refresh"},
+		{"GET", "/api/v1/.well-known/jwks.json"},
 		{"GET", "/api/v1/health"},
 	}
 

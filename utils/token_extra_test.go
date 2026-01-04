@@ -1,6 +1,8 @@
 package utils
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"testing"
 	"time"
 
@@ -9,15 +11,21 @@ import (
 )
 
 func TestParseTokenInvalidSignature(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	assert.NoError(t, err)
+	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	assert.NoError(t, err)
 	claims := Claims{Username: "user", Role: "admin"}
-	token, err := GenerateToken(claims, time.Minute, "issuer", []byte("secret"))
+	token, err := GenerateAccessToken(claims, time.Minute, "issuer", "kid", privateKey)
 	assert.NoError(t, err)
 
-	_, err = ParseToken(token, []byte("wrong"))
+	_, err = ParseAccessToken(token, &otherKey.PublicKey)
 	assert.Error(t, err)
 }
 
 func TestParseTokenInvalidMethod(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	assert.NoError(t, err)
 	now := time.Now()
 	claims := Claims{
 		Username: "user",
@@ -34,17 +42,19 @@ func TestParseTokenInvalidMethod(t *testing.T) {
 	signed, err := token.SignedString([]byte("secret"))
 	assert.NoError(t, err)
 
-	_, err = ParseToken(signed, []byte("secret"))
+	_, err = ParseAccessToken(signed, &privateKey.PublicKey)
 	assert.Error(t, err)
 }
 
 func TestParseTokenInvalidFlag(t *testing.T) {
 	originalParse := parseTokenWithClaims
-	parseTokenWithClaims = func(tokenStr string, claims *Claims, secret []byte) (*jwt.Token, error) {
+	parseTokenWithClaims = func(tokenStr string, claims *Claims, publicKey *rsa.PublicKey) (*jwt.Token, error) {
 		return &jwt.Token{Valid: false}, nil
 	}
 	defer func() { parseTokenWithClaims = originalParse }()
 
-	_, err := ParseToken("token", []byte("secret"))
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	assert.NoError(t, err)
+	_, err = ParseAccessToken("token", &privateKey.PublicKey)
 	assert.Error(t, err)
 }

@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,17 +14,23 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func testMiddlewareConfig() config.Config {
+func testMiddlewareConfig(t *testing.T) (config.Config, *rsa.PrivateKey) {
+	t.Helper()
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	assert.NoError(t, err)
 	return config.Config{
 		Auth: config.AuthConfig{
-			AccessTokenSecret: []byte("secret"),
-			AccessCookieName:  "access_token",
+			AccessTokenPrivateKey: privateKey,
+			AccessTokenPublicKey:  &privateKey.PublicKey,
+			AccessTokenKeyID:      "kid",
+			AccessCookieName:      "access_token",
 		},
-	}
+	}, privateKey
 }
 
 func TestAuthMiddlewareMissingToken(t *testing.T) {
-	handler := AuthMiddleware(testMiddlewareConfig())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	cfg, _ := testMiddlewareConfig(t)
+	handler := AuthMiddleware(cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -35,7 +43,8 @@ func TestAuthMiddlewareMissingToken(t *testing.T) {
 }
 
 func TestAuthMiddlewareInvalidToken(t *testing.T) {
-	handler := AuthMiddleware(testMiddlewareConfig())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	cfg, _ := testMiddlewareConfig(t)
+	handler := AuthMiddleware(cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -49,9 +58,9 @@ func TestAuthMiddlewareInvalidToken(t *testing.T) {
 }
 
 func TestAuthMiddlewareValidToken(t *testing.T) {
-	cfg := testMiddlewareConfig()
+	cfg, privateKey := testMiddlewareConfig(t)
 	claims := utils.Claims{Username: "user", Role: "admin"}
-	token, err := utils.GenerateToken(claims, time.Minute, "issuer", cfg.Auth.AccessTokenSecret)
+	token, err := utils.GenerateAccessToken(claims, time.Minute, "issuer", cfg.Auth.AccessTokenKeyID, privateKey)
 	assert.NoError(t, err)
 
 	handler := AuthMiddleware(cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
