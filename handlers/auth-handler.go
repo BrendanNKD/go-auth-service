@@ -173,21 +173,6 @@ func (h *AuthHandler) RefreshHandler(w http.ResponseWriter, r *http.Request) err
 	return nil
 }
 
-func (h *AuthHandler) AuthenticateHandler(w http.ResponseWriter, r *http.Request) error {
-	claims, ok := middleware.ClaimsFromContext(r.Context())
-	if !ok {
-		return middleware.NewAppError(http.StatusUnauthorized, "Unauthorized", nil)
-	}
-
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"valid":    true,
-		"message":  "Token is valid",
-		"username": claims.Username,
-		"role":     claims.Role,
-	})
-	return nil
-}
-
 func (h *AuthHandler) LogoutHandler(w http.ResponseWriter, r *http.Request) error {
 	w.Header().Set("Content-Type", "application/json")
 
