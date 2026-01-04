@@ -1,6 +1,10 @@
 package config
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"net/http"
 	"testing"
 
@@ -9,10 +13,27 @@ import (
 
 func setRequiredEnv(t *testing.T) {
 	t.Helper()
-	t.Setenv("JWT_ACCESS_SECRET", "access")
-	t.Setenv("JWT_REFRESH_SECRET", "refresh")
+	privateKeyPEM, publicKeyPEM := testKeyPair(t)
+	t.Setenv("JWT_ACCESS_PRIVATE_KEY", privateKeyPEM)
+	t.Setenv("JWT_ACCESS_PUBLIC_KEY", publicKeyPEM)
 	t.Setenv("DB_NAME", "auth")
 	t.Setenv("DB_USERNAME", "user")
+}
+
+func testKeyPair(t *testing.T) (string, string) {
+	t.Helper()
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	assert.NoError(t, err)
+
+	privateDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	assert.NoError(t, err)
+	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})
+
+	publicDER, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	assert.NoError(t, err)
+	publicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
+
+	return string(privatePEM), string(publicPEM)
 }
 
 func TestLoadSuccess(t *testing.T) {
@@ -36,8 +57,7 @@ func TestLoadSuccess(t *testing.T) {
 }
 
 func TestLoadMissingSecrets(t *testing.T) {
-	t.Setenv("JWT_ACCESS_SECRET", "")
-	t.Setenv("JWT_REFRESH_SECRET", "")
+	t.Setenv("JWT_ACCESS_PRIVATE_KEY", "")
 	_, err := Load()
 	assert.Error(t, err)
 }
@@ -72,8 +92,9 @@ func TestLoadInvalidValkeyDB(t *testing.T) {
 }
 
 func TestLoadMissingDatabaseConfig(t *testing.T) {
-	t.Setenv("JWT_ACCESS_SECRET", "access")
-	t.Setenv("JWT_REFRESH_SECRET", "refresh")
+	privateKeyPEM, publicKeyPEM := testKeyPair(t)
+	t.Setenv("JWT_ACCESS_PRIVATE_KEY", privateKeyPEM)
+	t.Setenv("JWT_ACCESS_PUBLIC_KEY", publicKeyPEM)
 	t.Setenv("DB_NAME", "")
 	t.Setenv("DB_INSTANCE_IDENTIFIER", "")
 	t.Setenv("DB_USERNAME", "")

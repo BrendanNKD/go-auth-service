@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"errors"
 	"net/http"
 	"os"
@@ -36,7 +38,7 @@ func TestLoadProdSecretsSuccess(t *testing.T) {
 	getSecret = func(name string) (string, error) {
 		switch name {
 		case "prod/jwt":
-			return `{"JWT_ACCESS_SECRET":"access","JWT_REFRESH_SECRET":"refresh"}`, nil
+			return `{"JWT_ACCESS_PRIVATE_KEY":"private","JWT_ACCESS_PUBLIC_KEY":"public","JWT_ACCESS_KID":"kid"}`, nil
 		case "prod/postgres":
 			return `{"username":"user","password":"pass","engine":"postgres","host":"localhost","port":5432,"dbInstanceIdentifier":"db"}`, nil
 		case "prod/valkey":
@@ -48,8 +50,8 @@ func TestLoadProdSecretsSuccess(t *testing.T) {
 	defer func() { getSecret = originalGetSecret }()
 
 	assert.NoError(t, loadProdSecrets())
-	assert.Equal(t, "access", os.Getenv("JWT_ACCESS_SECRET"))
-	assert.Equal(t, "refresh", os.Getenv("JWT_REFRESH_SECRET"))
+	assert.Equal(t, "private", os.Getenv("JWT_ACCESS_PRIVATE_KEY"))
+	assert.Equal(t, "public", os.Getenv("JWT_ACCESS_PUBLIC_KEY"))
 	assert.Equal(t, "user", os.Getenv("DB_USERNAME"))
 	assert.Equal(t, "localhost", os.Getenv("DB_HOST"))
 	assert.Equal(t, "localhost:6379", os.Getenv("VALKEY_ADDR"))
@@ -60,7 +62,7 @@ func TestLoadProdSecretsInvalidPostgresJSON(t *testing.T) {
 	getSecret = func(name string) (string, error) {
 		switch name {
 		case "prod/jwt":
-			return `{"JWT_ACCESS_SECRET":"access","JWT_REFRESH_SECRET":"refresh"}`, nil
+			return `{"JWT_ACCESS_PRIVATE_KEY":"private","JWT_ACCESS_PUBLIC_KEY":"public","JWT_ACCESS_KID":"kid"}`, nil
 		case "prod/postgres":
 			return "not-json", nil
 		default:
@@ -77,7 +79,7 @@ func TestLoadProdSecretsPostgresError(t *testing.T) {
 	getSecret = func(name string) (string, error) {
 		switch name {
 		case "prod/jwt":
-			return `{"JWT_ACCESS_SECRET":"access","JWT_REFRESH_SECRET":"refresh"}`, nil
+			return `{"JWT_ACCESS_PRIVATE_KEY":"private","JWT_ACCESS_PUBLIC_KEY":"public","JWT_ACCESS_KID":"kid"}`, nil
 		case "prod/postgres":
 			return "", errors.New("postgres error")
 		default:
@@ -110,13 +112,15 @@ func TestRunSuccess(t *testing.T) {
 
 	loadEnv = func(_ ...string) error { return errors.New("no env") }
 	loadConfig = func() (config.Config, error) {
+		privateKey := testPrivateKey(t)
 		return config.Config{
 			AppEnv: "dev",
 			Auth: config.AuthConfig{
-				AccessTokenSecret:  []byte("secret"),
-				RefreshTokenSecret: []byte("refresh"),
-				AccessCookieName:   "access",
-				RefreshCookieName:  "refresh",
+				AccessTokenPrivateKey: privateKey,
+				AccessTokenPublicKey:  &privateKey.PublicKey,
+				AccessTokenKeyID:      "kid",
+				AccessCookieName:      "access",
+				RefreshCookieName:     "refresh",
 			},
 			CORS: config.CORSConfig{AllowedOrigins: []string{"http://localhost"}},
 		}, nil
@@ -149,13 +153,15 @@ func TestRunDefaultEnv(t *testing.T) {
 	originalListenAndServe := listenAndServe
 
 	loadConfig = func() (config.Config, error) {
+		privateKey := testPrivateKey(t)
 		return config.Config{
 			AppEnv: "dev",
 			Auth: config.AuthConfig{
-				AccessTokenSecret:  []byte("secret"),
-				RefreshTokenSecret: []byte("refresh"),
-				AccessCookieName:   "access",
-				RefreshCookieName:  "refresh",
+				AccessTokenPrivateKey: privateKey,
+				AccessTokenPublicKey:  &privateKey.PublicKey,
+				AccessTokenKeyID:      "kid",
+				AccessCookieName:      "access",
+				RefreshCookieName:     "refresh",
 			},
 			CORS: config.CORSConfig{AllowedOrigins: []string{"http://localhost"}},
 		}, nil
@@ -208,7 +214,8 @@ func TestRunConnectDBError(t *testing.T) {
 	originalLoadConfig := loadConfig
 	originalConnectDB := connectDB
 	loadConfig = func() (config.Config, error) {
-		return config.Config{Auth: config.AuthConfig{AccessTokenSecret: []byte("a"), RefreshTokenSecret: []byte("b")}}, nil
+		privateKey := testPrivateKey(t)
+		return config.Config{Auth: config.AuthConfig{AccessTokenPrivateKey: privateKey, AccessTokenPublicKey: &privateKey.PublicKey}}, nil
 	}
 	connectDB = func(cfg config.DatabaseConfig) error { return errors.New("db error") }
 	defer func() {
@@ -225,7 +232,8 @@ func TestRunValkeyError(t *testing.T) {
 	originalConnectDB := connectDB
 	originalNewValkeyStore := newValkeyStore
 	loadConfig = func() (config.Config, error) {
-		return config.Config{Auth: config.AuthConfig{AccessTokenSecret: []byte("a"), RefreshTokenSecret: []byte("b")}}, nil
+		privateKey := testPrivateKey(t)
+		return config.Config{Auth: config.AuthConfig{AccessTokenPrivateKey: privateKey, AccessTokenPublicKey: &privateKey.PublicKey}}, nil
 	}
 	connectDB = func(cfg config.DatabaseConfig) error { return nil }
 	newValkeyStore = func(cfg config.ValkeyConfig) (*store.ValkeyStore, error) { return nil, errors.New("valkey error") }
@@ -247,13 +255,15 @@ func TestRunListenError(t *testing.T) {
 	originalListenAndServe := listenAndServe
 
 	loadConfig = func() (config.Config, error) {
+		privateKey := testPrivateKey(t)
 		return config.Config{
 			AppEnv: "dev",
 			Auth: config.AuthConfig{
-				AccessTokenSecret:  []byte("secret"),
-				RefreshTokenSecret: []byte("refresh"),
-				AccessCookieName:   "access",
-				RefreshCookieName:  "refresh",
+				AccessTokenPrivateKey: privateKey,
+				AccessTokenPublicKey:  &privateKey.PublicKey,
+				AccessTokenKeyID:      "kid",
+				AccessCookieName:      "access",
+				RefreshCookieName:     "refresh",
 			},
 			CORS: config.CORSConfig{AllowedOrigins: []string{"http://localhost"}},
 		}, nil
@@ -286,13 +296,15 @@ func TestMainFunction(t *testing.T) {
 	originalLogFatal := logFatal
 
 	loadConfig = func() (config.Config, error) {
+		privateKey := testPrivateKey(t)
 		return config.Config{
 			AppEnv: "dev",
 			Auth: config.AuthConfig{
-				AccessTokenSecret:  []byte("secret"),
-				RefreshTokenSecret: []byte("refresh"),
-				AccessCookieName:   "access",
-				RefreshCookieName:  "refresh",
+				AccessTokenPrivateKey: privateKey,
+				AccessTokenPublicKey:  &privateKey.PublicKey,
+				AccessTokenKeyID:      "kid",
+				AccessCookieName:      "access",
+				RefreshCookieName:     "refresh",
 			},
 			CORS: config.CORSConfig{AllowedOrigins: []string{"http://localhost"}},
 		}, nil
@@ -332,4 +344,11 @@ func TestMainFunctionError(t *testing.T) {
 
 	main()
 	assert.True(t, called)
+}
+
+func testPrivateKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	assert.NoError(t, err)
+	return privateKey
 }

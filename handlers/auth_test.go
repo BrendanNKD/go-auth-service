@@ -3,6 +3,8 @@ package handlers_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,8 @@ import (
 	"auth-service/db"
 	"auth-service/handlers"
 	"auth-service/models"
+	"auth-service/store"
+	"auth-service/utils"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/assert"
@@ -20,26 +24,53 @@ import (
 )
 
 type stubTokenStore struct {
-	entries map[string]string
+	tokens   map[string]store.RefreshTokenMetadata
+	sessions map[string]store.RefreshSession
 }
 
 func newStubTokenStore() *stubTokenStore {
-	return &stubTokenStore{entries: make(map[string]string)}
+	return &stubTokenStore{
+		tokens:   make(map[string]store.RefreshTokenMetadata),
+		sessions: make(map[string]store.RefreshSession),
+	}
 }
 
-func (s *stubTokenStore) Save(_ context.Context, tokenID, username string, _ time.Duration) error {
-	s.entries[tokenID] = username
+func (s *stubTokenStore) SaveToken(_ context.Context, tokenHash string, metadata store.RefreshTokenMetadata, _ time.Duration) error {
+	s.tokens[tokenHash] = metadata
 	return nil
 }
 
-func (s *stubTokenStore) Exists(_ context.Context, tokenID string) (bool, error) {
-	_, ok := s.entries[tokenID]
-	return ok, nil
+func (s *stubTokenStore) GetToken(_ context.Context, tokenHash string) (store.RefreshTokenMetadata, bool, error) {
+	metadata, ok := s.tokens[tokenHash]
+	return metadata, ok, nil
 }
 
-func (s *stubTokenStore) Revoke(_ context.Context, tokenID string) error {
-	delete(s.entries, tokenID)
+func (s *stubTokenStore) RevokeToken(_ context.Context, tokenHash string) error {
+	delete(s.tokens, tokenHash)
 	return nil
+}
+
+func (s *stubTokenStore) SaveSession(_ context.Context, sessionID string, session store.RefreshSession, _ time.Duration) error {
+	s.sessions[sessionID] = session
+	return nil
+}
+
+func (s *stubTokenStore) GetSession(_ context.Context, sessionID string) (store.RefreshSession, bool, error) {
+	session, ok := s.sessions[sessionID]
+	return session, ok, nil
+}
+
+func (s *stubTokenStore) RevokeSession(_ context.Context, sessionID string) error {
+	delete(s.sessions, sessionID)
+	return nil
+}
+
+func (s *stubTokenStore) MarkRevoked(_ context.Context, tokenHash, sessionID string, _ time.Duration) error {
+	return nil
+}
+
+func (s *stubTokenStore) IsRevoked(_ context.Context, tokenHash string) (string, bool, error) {
+	return "", false, nil
 }
 
 func (s *stubTokenStore) Close() error {
@@ -53,15 +84,20 @@ func setupMockDB() (sqlmock.Sqlmock, func()) {
 }
 
 func testConfig() config.Config {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		panic(err)
+	}
 	return config.Config{
 		Auth: config.AuthConfig{
-			AccessTokenSecret:  []byte("access-secret"),
-			RefreshTokenSecret: []byte("refresh-secret"),
-			Issuer:             "test-issuer",
-			AccessTokenTTL:     time.Minute,
-			RefreshTokenTTL:    time.Hour,
-			AccessCookieName:   "access_token",
-			RefreshCookieName:  "refresh_token",
+			AccessTokenPrivateKey: privateKey,
+			AccessTokenPublicKey:  &privateKey.PublicKey,
+			AccessTokenKeyID:      "kid",
+			Issuer:                "test-issuer",
+			AccessTokenTTL:        time.Minute,
+			RefreshTokenTTL:       time.Hour,
+			AccessCookieName:      "access_token",
+			RefreshCookieName:     "refresh_token",
 		},
 		Cookie: config.CookieConfig{
 			Path:     "/",
@@ -178,6 +214,15 @@ func TestRefreshHandler(t *testing.T) {
 		}
 	}
 	if assert.NotNil(t, refreshCookie) {
+		tokenHash := utils.HashRefreshToken(refreshCookie.Value)
+		metadata, found, err := store.GetToken(context.Background(), tokenHash)
+		assert.NoError(t, err)
+		assert.True(t, found)
+		session, found, err := store.GetSession(context.Background(), metadata.SessionID)
+		assert.NoError(t, err)
+		assert.True(t, found)
+		assert.Equal(t, tokenHash, session.CurrentTokenHash)
+
 		refreshReq := httptest.NewRequest("POST", "/refresh", nil)
 		refreshReq.AddCookie(refreshCookie)
 		refreshRec := executeRequest(handler.RefreshHandler, refreshReq)

@@ -1,6 +1,8 @@
 package utils_test
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"testing"
 	"time"
 
@@ -10,18 +12,19 @@ import (
 )
 
 func TestGenerateAndParseToken(t *testing.T) {
-	secret := []byte("supersecret")
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	assert.NoError(t, err)
 	claims := utils.Claims{
 		Username: "testuser",
 		Role:     "admin",
 	}
 	claims.ID = "token-id"
 
-	token, err := utils.GenerateToken(claims, time.Minute, "test-issuer", secret)
+	token, err := utils.GenerateAccessToken(claims, time.Minute, "test-issuer", "kid", privateKey)
 	assert.NoError(t, err)
 	assert.NotEmpty(t, token)
 
-	parsed, err := utils.ParseToken(token, secret)
+	parsed, err := utils.ParseAccessToken(token, &privateKey.PublicKey)
 	assert.NoError(t, err)
 	assert.Equal(t, claims.Username, parsed.Username)
 	assert.Equal(t, claims.Role, parsed.Role)
@@ -29,7 +32,8 @@ func TestGenerateAndParseToken(t *testing.T) {
 }
 
 func TestParseTokenInvalid(t *testing.T) {
-	secret := []byte("supersecret")
-	_, err := utils.ParseToken("not.a.valid.token", secret)
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	assert.NoError(t, err)
+	_, err = utils.ParseAccessToken("not.a.valid.token", &privateKey.PublicKey)
 	assert.Error(t, err)
 }

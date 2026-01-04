@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"crypto/rsa"
 	"fmt"
 	"time"
 
@@ -14,29 +15,32 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 
-var parseTokenWithClaims = func(tokenStr string, claims *Claims, secret []byte) (*jwt.Token, error) {
-	parser := jwt.NewParser(jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Name}))
+var parseTokenWithClaims = func(tokenStr string, claims *Claims, publicKey *rsa.PublicKey) (*jwt.Token, error) {
+	parser := jwt.NewParser(jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Name}))
 	return parser.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (interface{}, error) {
-		return secret, nil
+		return publicKey, nil
 	})
 }
 
-// GenerateToken creates a signed JWT for the provided claims.
-func GenerateToken(claims Claims, ttl time.Duration, issuer string, secret []byte) (string, error) {
+// GenerateAccessToken creates a signed JWT for the provided claims.
+func GenerateAccessToken(claims Claims, ttl time.Duration, issuer, keyID string, privateKey *rsa.PrivateKey) (string, error) {
 	now := time.Now()
 	claims.Issuer = issuer
 	claims.IssuedAt = jwt.NewNumericDate(now)
 	claims.NotBefore = jwt.NewNumericDate(now)
 	claims.ExpiresAt = jwt.NewNumericDate(now.Add(ttl))
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(secret)
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	if keyID != "" {
+		token.Header["kid"] = keyID
+	}
+	return token.SignedString(privateKey)
 }
 
-// ParseToken validates a token and returns its claims if valid.
-func ParseToken(tokenStr string, secret []byte) (*Claims, error) {
+// ParseAccessToken validates a token and returns its claims if valid.
+func ParseAccessToken(tokenStr string, publicKey *rsa.PublicKey) (*Claims, error) {
 	claims := &Claims{}
-	token, err := parseTokenWithClaims(tokenStr, claims, secret)
+	token, err := parseTokenWithClaims(tokenStr, claims, publicKey)
 	if err != nil {
 		return nil, fmt.Errorf("invalid token: %w", err)
 	}

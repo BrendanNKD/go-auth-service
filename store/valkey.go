@@ -3,6 +3,7 @@ package store
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strconv"
@@ -13,9 +14,14 @@ import (
 )
 
 type RefreshTokenStore interface {
-	Save(ctx context.Context, tokenID, username string, ttl time.Duration) error
-	Exists(ctx context.Context, tokenID string) (bool, error)
-	Revoke(ctx context.Context, tokenID string) error
+	SaveToken(ctx context.Context, tokenHash string, metadata RefreshTokenMetadata, ttl time.Duration) error
+	GetToken(ctx context.Context, tokenHash string) (RefreshTokenMetadata, bool, error)
+	RevokeToken(ctx context.Context, tokenHash string) error
+	SaveSession(ctx context.Context, sessionID string, session RefreshSession, ttl time.Duration) error
+	GetSession(ctx context.Context, sessionID string) (RefreshSession, bool, error)
+	RevokeSession(ctx context.Context, sessionID string) error
+	MarkRevoked(ctx context.Context, tokenHash, sessionID string, ttl time.Duration) error
+	IsRevoked(ctx context.Context, tokenHash string) (string, bool, error)
 	Close() error
 }
 
@@ -31,6 +37,20 @@ type ValkeyStore struct {
 	db       int
 	prefix   string
 	timeout  time.Duration
+}
+
+type RefreshTokenMetadata struct {
+	SessionID string    `json:"session_id"`
+	Username  string    `json:"username"`
+	Role      string    `json:"role"`
+	IssuedAt  time.Time `json:"issued_at"`
+}
+
+type RefreshSession struct {
+	CurrentTokenHash string    `json:"current_token_hash"`
+	Username         string    `json:"username"`
+	Role             string    `json:"role"`
+	IssuedAt         time.Time `json:"issued_at"`
 }
 
 func NewValkeyStore(cfg config.ValkeyConfig) (*ValkeyStore, error) {
@@ -51,36 +71,97 @@ func NewValkeyStore(cfg config.ValkeyConfig) (*ValkeyStore, error) {
 	return store, nil
 }
 
-func (v *ValkeyStore) Save(ctx context.Context, tokenID, username string, ttl time.Duration) error {
+func (v *ValkeyStore) SaveToken(ctx context.Context, tokenHash string, metadata RefreshTokenMetadata, ttl time.Duration) error {
 	seconds := strconv.FormatInt(int64(ttl.Seconds()), 10)
-	_, err := v.do(ctx, "SET", v.key(tokenID), username, "EX", seconds)
+	payload, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+	_, err = v.do(ctx, "SET", v.tokenKey(tokenHash), string(payload), "EX", seconds)
 	return err
 }
 
-func (v *ValkeyStore) Exists(ctx context.Context, tokenID string) (bool, error) {
-	response, err := v.do(ctx, "EXISTS", v.key(tokenID))
+func (v *ValkeyStore) GetToken(ctx context.Context, tokenHash string) (RefreshTokenMetadata, bool, error) {
+	response, err := v.do(ctx, "GET", v.tokenKey(tokenHash))
 	if err != nil {
-		return false, err
+		return RefreshTokenMetadata{}, false, err
 	}
-
-	count, err := strconv.Atoi(response)
-	if err != nil {
-		return false, fmt.Errorf("unexpected EXISTS response: %s", response)
+	if response == "" {
+		return RefreshTokenMetadata{}, false, nil
 	}
-	return count > 0, nil
+	var metadata RefreshTokenMetadata
+	if err := json.Unmarshal([]byte(response), &metadata); err != nil {
+		return RefreshTokenMetadata{}, false, err
+	}
+	return metadata, true, nil
 }
 
-func (v *ValkeyStore) Revoke(ctx context.Context, tokenID string) error {
-	_, err := v.do(ctx, "DEL", v.key(tokenID))
+func (v *ValkeyStore) RevokeToken(ctx context.Context, tokenHash string) error {
+	_, err := v.do(ctx, "DEL", v.tokenKey(tokenHash))
 	return err
+}
+
+func (v *ValkeyStore) SaveSession(ctx context.Context, sessionID string, session RefreshSession, ttl time.Duration) error {
+	seconds := strconv.FormatInt(int64(ttl.Seconds()), 10)
+	payload, err := json.Marshal(session)
+	if err != nil {
+		return err
+	}
+	_, err = v.do(ctx, "SET", v.sessionKey(sessionID), string(payload), "EX", seconds)
+	return err
+}
+
+func (v *ValkeyStore) GetSession(ctx context.Context, sessionID string) (RefreshSession, bool, error) {
+	response, err := v.do(ctx, "GET", v.sessionKey(sessionID))
+	if err != nil {
+		return RefreshSession{}, false, err
+	}
+	if response == "" {
+		return RefreshSession{}, false, nil
+	}
+	var session RefreshSession
+	if err := json.Unmarshal([]byte(response), &session); err != nil {
+		return RefreshSession{}, false, err
+	}
+	return session, true, nil
+}
+
+func (v *ValkeyStore) RevokeSession(ctx context.Context, sessionID string) error {
+	_, err := v.do(ctx, "DEL", v.sessionKey(sessionID))
+	return err
+}
+
+func (v *ValkeyStore) MarkRevoked(ctx context.Context, tokenHash, sessionID string, ttl time.Duration) error {
+	seconds := strconv.FormatInt(int64(ttl.Seconds()), 10)
+	_, err := v.do(ctx, "SET", v.revokedKey(tokenHash), sessionID, "EX", seconds)
+	return err
+}
+
+func (v *ValkeyStore) IsRevoked(ctx context.Context, tokenHash string) (string, bool, error) {
+	response, err := v.do(ctx, "GET", v.revokedKey(tokenHash))
+	if err != nil {
+		return "", false, err
+	}
+	if response == "" {
+		return "", false, nil
+	}
+	return response, true, nil
 }
 
 func (v *ValkeyStore) Close() error {
 	return nil
 }
 
-func (v *ValkeyStore) key(tokenID string) string {
-	return fmt.Sprintf("%s:%s", v.prefix, tokenID)
+func (v *ValkeyStore) tokenKey(tokenHash string) string {
+	return fmt.Sprintf("%s:token:%s", v.prefix, tokenHash)
+}
+
+func (v *ValkeyStore) sessionKey(sessionID string) string {
+	return fmt.Sprintf("%s:session:%s", v.prefix, sessionID)
+}
+
+func (v *ValkeyStore) revokedKey(tokenHash string) string {
+	return fmt.Sprintf("%s:revoked:%s", v.prefix, tokenHash)
 }
 
 func (v *ValkeyStore) do(ctx context.Context, args ...string) (string, error) {
