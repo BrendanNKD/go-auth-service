@@ -188,12 +188,12 @@ func TestLoginHandlerCompareError(t *testing.T) {
 
 func TestIssueTokensErrors(t *testing.T) {
 	handler := NewAuthHandler(configForTests(), nil)
-	err := handler.issueTokens(context.Background(), httptest.NewRecorder(), "user", "role")
+	_, err := handler.issueTokens(context.Background(), httptest.NewRecorder(), "user", "role")
 	assert.Error(t, err)
 
 	store := &configurableTokenStore{saveErr: errors.New("save error")}
 	handler = NewAuthHandler(configForTests(), store)
-	err = handler.issueTokens(context.Background(), httptest.NewRecorder(), "user", "role")
+	_, err = handler.issueTokens(context.Background(), httptest.NewRecorder(), "user", "role")
 	assert.Error(t, err)
 
 	originalRand := randRead
@@ -202,7 +202,7 @@ func TestIssueTokensErrors(t *testing.T) {
 	}
 
 	handler = NewAuthHandler(configForTests(), &configurableTokenStore{})
-	err = handler.issueTokens(context.Background(), httptest.NewRecorder(), "user", "role")
+	_, err = handler.issueTokens(context.Background(), httptest.NewRecorder(), "user", "role")
 	assert.Error(t, err)
 	randRead = originalRand
 
@@ -213,7 +213,7 @@ func TestIssueTokensErrors(t *testing.T) {
 	defer func() { generateToken = originalGenerateToken }()
 
 	handler = NewAuthHandler(configForTests(), &configurableTokenStore{})
-	err = handler.issueTokens(context.Background(), httptest.NewRecorder(), "user", "role")
+	_, err = handler.issueTokens(context.Background(), httptest.NewRecorder(), "user", "role")
 	assert.Error(t, err)
 
 	call := 0
@@ -225,7 +225,7 @@ func TestIssueTokensErrors(t *testing.T) {
 		return "token", nil
 	}
 	handler = NewAuthHandler(configForTests(), &configurableTokenStore{})
-	err = handler.issueTokens(context.Background(), httptest.NewRecorder(), "user", "role")
+	_, err = handler.issueTokens(context.Background(), httptest.NewRecorder(), "user", "role")
 	assert.Error(t, err)
 }
 
@@ -250,13 +250,13 @@ func TestRotateTokens(t *testing.T) {
 	handler := NewAuthHandler(configForTests(), &configurableTokenStore{revokeErr: errors.New("revoke error")})
 	claims := &utils.Claims{}
 	claims.ID = "id"
-	err := handler.rotateTokens(context.Background(), httptest.NewRecorder(), claims)
+	_, err := handler.rotateTokens(context.Background(), httptest.NewRecorder(), claims)
 	assert.Error(t, err)
 
 	handler = NewAuthHandler(configForTests(), &configurableTokenStore{exists: true})
 	claims = &utils.Claims{Username: "user", Role: "role"}
 	claims.ID = "id"
-	err = handler.rotateTokens(context.Background(), httptest.NewRecorder(), claims)
+	_, err = handler.rotateTokens(context.Background(), httptest.NewRecorder(), claims)
 	assert.NoError(t, err)
 }
 
