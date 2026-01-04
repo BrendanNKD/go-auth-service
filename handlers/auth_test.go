@@ -127,6 +127,10 @@ func TestLoginHandler(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	cookies := rec.Result().Cookies()
 	assert.NotEmpty(t, cookies)
+
+	var payload map[string]interface{}
+	assert.NoError(t, json.NewDecoder(rec.Body).Decode(&payload))
+	assert.NotEmpty(t, payload["access_token"])
 }
 
 func TestLoginHandler_WrongPassword(t *testing.T) {
@@ -180,6 +184,10 @@ func TestRefreshHandler(t *testing.T) {
 		refreshReq.AddCookie(refreshCookie)
 		refreshRec := executeRequest(handler.RefreshHandler, refreshReq)
 		assert.Equal(t, http.StatusOK, refreshRec.Code)
+
+		var payload map[string]interface{}
+		assert.NoError(t, json.NewDecoder(refreshRec.Body).Decode(&payload))
+		assert.NotEmpty(t, payload["access_token"])
 	}
 }
 

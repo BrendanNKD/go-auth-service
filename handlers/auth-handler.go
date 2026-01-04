@@ -126,12 +126,18 @@ func (h *AuthHandler) LoginHandler(w http.ResponseWriter, r *http.Request) error
 		return middleware.NewAppError(http.StatusUnauthorized, "Invalid username or password", err)
 	}
 
-	if err := h.issueTokens(r.Context(), w, user.Username, role); err != nil {
+	accessToken, err := h.issueTokens(r.Context(), w, user.Username, role)
+	if err != nil {
 		log.Printf("Error issuing tokens: %v", err)
 		return middleware.NewAppError(http.StatusInternalServerError, "Could not generate tokens", err)
 	}
 
-	json.NewEncoder(w).Encode(JSONResponse{"message": "Login successful"})
+	json.NewEncoder(w).Encode(JSONResponse{
+		"message":      "Login successful",
+		"access_token": accessToken,
+		"token_type":   "Bearer",
+		"expires_in":   int(h.cfg.Auth.AccessTokenTTL.Seconds()),
+	})
 	return nil
 }
 
@@ -152,12 +158,18 @@ func (h *AuthHandler) RefreshHandler(w http.ResponseWriter, r *http.Request) err
 		return middleware.NewAppError(http.StatusUnauthorized, "Refresh token revoked", err)
 	}
 
-	if err := h.rotateTokens(r.Context(), w, claims); err != nil {
+	accessToken, err := h.rotateTokens(r.Context(), w, claims)
+	if err != nil {
 		log.Printf("Error rotating tokens: %v", err)
 		return middleware.NewAppError(http.StatusInternalServerError, "Could not refresh token", err)
 	}
 
-	json.NewEncoder(w).Encode(JSONResponse{"message": "Token refreshed"})
+	json.NewEncoder(w).Encode(JSONResponse{
+		"message":      "Token refreshed",
+		"access_token": accessToken,
+		"token_type":   "Bearer",
+		"expires_in":   int(h.cfg.Auth.AccessTokenTTL.Seconds()),
+	})
 	return nil
 }
 
@@ -194,7 +206,7 @@ func (h *AuthHandler) LogoutHandler(w http.ResponseWriter, r *http.Request) erro
 	return nil
 }
 
-func (h *AuthHandler) issueTokens(ctx context.Context, w http.ResponseWriter, username, role string) error {
+func (h *AuthHandler) issueTokens(ctx context.Context, w http.ResponseWriter, username, role string) (string, error) {
 	accessClaims := utils.Claims{
 		Username: username,
 		Role:     role,
@@ -202,12 +214,12 @@ func (h *AuthHandler) issueTokens(ctx context.Context, w http.ResponseWriter, us
 
 	accessToken, err := generateToken(accessClaims, h.cfg.Auth.AccessTokenTTL, h.cfg.Auth.Issuer, h.cfg.Auth.AccessTokenSecret)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	refreshID, err := newTokenID()
 	if err != nil {
-		return err
+		return "", err
 	}
 	refreshClaims := utils.Claims{
 		Username: username,
@@ -217,19 +229,19 @@ func (h *AuthHandler) issueTokens(ctx context.Context, w http.ResponseWriter, us
 
 	refreshToken, err := generateToken(refreshClaims, h.cfg.Auth.RefreshTokenTTL, h.cfg.Auth.Issuer, h.cfg.Auth.RefreshTokenSecret)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	if h.tokenStore == nil {
-		return fmt.Errorf("token store not configured")
+		return "", fmt.Errorf("token store not configured")
 	}
 	if err := h.tokenStore.Save(ctx, refreshID, username, h.cfg.Auth.RefreshTokenTTL); err != nil {
-		return err
+		return "", err
 	}
 
 	setCookie(w, h.cfg, h.cfg.Auth.AccessCookieName, accessToken, h.cfg.Auth.AccessTokenTTL)
 	setCookie(w, h.cfg, h.cfg.Auth.RefreshCookieName, refreshToken, h.cfg.Auth.RefreshTokenTTL)
-	return nil
+	return accessToken, nil
 }
 
 func (h *AuthHandler) validateRefreshToken(ctx context.Context, tokenID string) error {
@@ -250,9 +262,9 @@ func (h *AuthHandler) validateRefreshToken(ctx context.Context, tokenID string) 
 	return nil
 }
 
-func (h *AuthHandler) rotateTokens(ctx context.Context, w http.ResponseWriter, claims *utils.Claims) error {
+func (h *AuthHandler) rotateTokens(ctx context.Context, w http.ResponseWriter, claims *utils.Claims) (string, error) {
 	if err := h.tokenStore.Revoke(ctx, claims.ID); err != nil {
-		return err
+		return "", err
 	}
 	return h.issueTokens(ctx, w, claims.Username, claims.Role)
 }
