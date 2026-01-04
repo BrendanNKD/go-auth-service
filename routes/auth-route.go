@@ -1,8 +1,6 @@
 package routes
 
 import (
-	"net/http"
-
 	"auth-service/config"
 	"auth-service/handlers"
 	"auth-service/middleware"
