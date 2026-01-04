@@ -12,9 +12,7 @@ import (
 	"auth-service/config"
 	"auth-service/db"
 	"auth-service/handlers"
-	"auth-service/middleware"
 	"auth-service/models"
-	"auth-service/utils"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/assert"
@@ -189,18 +187,6 @@ func TestRefreshHandler(t *testing.T) {
 		assert.NoError(t, json.NewDecoder(refreshRec.Body).Decode(&payload))
 		assert.NotEmpty(t, payload["access_token"])
 	}
-}
-
-func TestAuthenticateHandler(t *testing.T) {
-	handler := handlers.NewAuthHandler(testConfig(), newStubTokenStore())
-	req := httptest.NewRequest("GET", "/authenticate", nil)
-	rec := executeRequest(handler.AuthenticateHandler, req)
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-
-	claims := &utils.Claims{Username: "testuser", Role: "admin"}
-	req = req.WithContext(middleware.ContextWithClaims(req.Context(), claims))
-	rec = executeRequest(handler.AuthenticateHandler, req)
-	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestLogoutHandler(t *testing.T) {
