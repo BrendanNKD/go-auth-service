@@ -82,12 +82,15 @@ func TestRegisterHandler(t *testing.T) {
 	mock, cleanup := setupMockDB()
 	defer cleanup()
 
+	mock.ExpectQuery("SELECT id FROM roles WHERE name = \\$1").
+		WithArgs("jobseeker").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("role-id"))
 	mock.ExpectExec("INSERT INTO users").
-		WithArgs("testuser", sqlmock.AnyArg(), "jobseeker").
+		WithArgs("testuser", sqlmock.AnyArg(), sqlmock.AnyArg(), "role-id").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	handler := handlers.NewAuthHandler(testConfig(), newStubTokenStore())
-	user := models.Users{Username: "testuser", Password: "password", Role: "jobseeker"}
+	user := models.User{Username: "testuser", Password: "password", Role: "jobseeker"}
 	body, err := json.Marshal(user)
 	assert.NoError(t, err)
 
@@ -110,14 +113,14 @@ func TestLoginHandler(t *testing.T) {
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte("password"), bcrypt.DefaultCost)
 	assert.NoError(t, err)
 
-	mock.ExpectQuery(`SELECT password, role FROM users WHERE username = \$1`).
+	mock.ExpectQuery(`SELECT u.password_hash, r.name FROM users u JOIN roles r ON r.id = u.role_id WHERE u.username = \$1`).
 		WithArgs("testuser").
 		WillReturnRows(sqlmock.NewRows([]string{"password", "role"}).
 			AddRow(string(hashedPassword), "jobseeker"))
 
 	store := newStubTokenStore()
 	handler := handlers.NewAuthHandler(testConfig(), store)
-	user := models.Users{Username: "testuser", Password: "password"}
+	user := models.User{Username: "testuser", Password: "password"}
 	body, _ := json.Marshal(user)
 	req := httptest.NewRequest("POST", "/login", bytes.NewBuffer(body))
 	rec := executeRequest(handler.LoginHandler, req)
@@ -131,13 +134,13 @@ func TestLoginHandler_WrongPassword(t *testing.T) {
 	defer cleanup()
 
 	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte("different_password"), bcrypt.DefaultCost)
-	mock.ExpectQuery(`SELECT password, role FROM users WHERE username = \$1`).
+	mock.ExpectQuery(`SELECT u.password_hash, r.name FROM users u JOIN roles r ON r.id = u.role_id WHERE u.username = \$1`).
 		WithArgs("testuser").
 		WillReturnRows(sqlmock.NewRows([]string{"password", "role"}).
 			AddRow(string(hashedPassword), "jobseeker"))
 
 	handler := handlers.NewAuthHandler(testConfig(), newStubTokenStore())
-	user := models.Users{Username: "testuser", Password: "password"}
+	user := models.User{Username: "testuser", Password: "password"}
 	body, _ := json.Marshal(user)
 	req := httptest.NewRequest("POST", "/login", bytes.NewBuffer(body))
 	rec := executeRequest(handler.LoginHandler, req)
@@ -151,7 +154,7 @@ func TestRefreshHandler(t *testing.T) {
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte("password"), bcrypt.DefaultCost)
 	assert.NoError(t, err)
 
-	mock.ExpectQuery(`SELECT password, role FROM users WHERE username = \$1`).
+	mock.ExpectQuery(`SELECT u.password_hash, r.name FROM users u JOIN roles r ON r.id = u.role_id WHERE u.username = \$1`).
 		WithArgs("testuser").
 		WillReturnRows(sqlmock.NewRows([]string{"password", "role"}).
 			AddRow(string(hashedPassword), "jobseeker"))
@@ -160,7 +163,7 @@ func TestRefreshHandler(t *testing.T) {
 	cfg := testConfig()
 	handler := handlers.NewAuthHandler(cfg, store)
 
-	loginBody, _ := json.Marshal(models.Users{Username: "testuser", Password: "password"})
+	loginBody, _ := json.Marshal(models.User{Username: "testuser", Password: "password"})
 	loginReq := httptest.NewRequest("POST", "/login", bytes.NewBuffer(loginBody))
 	loginRec := executeRequest(handler.LoginHandler, loginReq)
 	assert.Equal(t, http.StatusOK, loginRec.Code)

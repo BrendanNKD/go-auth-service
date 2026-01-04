@@ -82,7 +82,7 @@ func TestRegisterHandlerValidationErrors(t *testing.T) {
 	rec := executeRequest(handler.RegisterHandler, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
-	body, _ := json.Marshal(models.Users{Username: "", Password: ""})
+	body, _ := json.Marshal(models.User{Username: "", Password: ""})
 	req = httptest.NewRequest(http.MethodPost, "/register", bytes.NewBuffer(body))
 	rec = executeRequest(handler.RegisterHandler, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -98,7 +98,7 @@ func TestRegisterHandlerHashError(t *testing.T) {
 	mock, cleanup := setupMockDB(t)
 	defer cleanup()
 
-	body, _ := json.Marshal(models.Users{Username: "user", Password: "pass"})
+	body, _ := json.Marshal(models.User{Username: "user", Password: "pass"})
 	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewBuffer(body))
 
 	handler := NewAuthHandler(configForTests(), &configurableTokenStore{})
@@ -111,11 +111,14 @@ func TestRegisterHandlerDBError(t *testing.T) {
 	mock, cleanup := setupMockDB(t)
 	defer cleanup()
 
+	mock.ExpectQuery("SELECT id FROM roles WHERE name = \\$1").
+		WithArgs("user").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("role-id"))
 	mock.ExpectExec("INSERT INTO users").
-		WithArgs("user", sqlmock.AnyArg(), "").
+		WithArgs("user", sqlmock.AnyArg(), sqlmock.AnyArg(), "role-id").
 		WillReturnError(errors.New("db error"))
 
-	body, _ := json.Marshal(models.Users{Username: "user", Password: "pass"})
+	body, _ := json.Marshal(models.User{Username: "user", Password: "pass"})
 	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewBuffer(body))
 
 	handler := NewAuthHandler(configForTests(), &configurableTokenStore{})
@@ -128,18 +131,18 @@ func TestLoginHandlerErrors(t *testing.T) {
 	mock, cleanup := setupMockDB(t)
 	defer cleanup()
 
-	mock.ExpectQuery(`SELECT password, role FROM users WHERE username = \$1`).
+	mock.ExpectQuery(`SELECT u.password_hash, r.name FROM users u JOIN roles r ON r.id = u.role_id WHERE u.username = \$1`).
 		WithArgs("missing").
 		WillReturnError(sql.ErrNoRows)
 
-	body, _ := json.Marshal(models.Users{Username: "missing", Password: "pass"})
+	body, _ := json.Marshal(models.User{Username: "missing", Password: "pass"})
 	req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewBuffer(body))
 
 	handler := NewAuthHandler(configForTests(), &configurableTokenStore{})
 	rec := executeRequest(handler.LoginHandler, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
-	body, _ = json.Marshal(models.Users{})
+	body, _ = json.Marshal(models.User{})
 	req = httptest.NewRequest(http.MethodPost, "/login", bytes.NewBuffer(body))
 	rec = executeRequest(handler.LoginHandler, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -148,11 +151,11 @@ func TestLoginHandlerErrors(t *testing.T) {
 	rec = executeRequest(handler.LoginHandler, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
-	mock.ExpectQuery(`SELECT password, role FROM users WHERE username = \$1`).
+	mock.ExpectQuery(`SELECT u.password_hash, r.name FROM users u JOIN roles r ON r.id = u.role_id WHERE u.username = \$1`).
 		WithArgs("error").
 		WillReturnError(errors.New("db error"))
 
-	body, _ = json.Marshal(models.Users{Username: "error", Password: "pass"})
+	body, _ = json.Marshal(models.User{Username: "error", Password: "pass"})
 	req = httptest.NewRequest(http.MethodPost, "/login", bytes.NewBuffer(body))
 	rec = executeRequest(handler.LoginHandler, req)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -164,7 +167,7 @@ func TestLoginHandlerCompareError(t *testing.T) {
 	mock, cleanup := setupMockDB(t)
 	defer cleanup()
 
-	mock.ExpectQuery(`SELECT password, role FROM users WHERE username = \$1`).
+	mock.ExpectQuery(`SELECT u.password_hash, r.name FROM users u JOIN roles r ON r.id = u.role_id WHERE u.username = \$1`).
 		WithArgs("user").
 		WillReturnRows(sqlmock.NewRows([]string{"password", "role"}).AddRow("hashed", "role"))
 
@@ -174,7 +177,7 @@ func TestLoginHandlerCompareError(t *testing.T) {
 	}
 	defer func() { compareHashAndPassword = originalCompare }()
 
-	body, _ := json.Marshal(models.Users{Username: "user", Password: "pass"})
+	body, _ := json.Marshal(models.User{Username: "user", Password: "pass"})
 	req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewBuffer(body))
 	handler := NewAuthHandler(configForTests(), &configurableTokenStore{})
 	rec := executeRequest(handler.LoginHandler, req)

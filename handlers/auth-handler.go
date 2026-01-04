@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"auth-service/config"
@@ -35,13 +36,15 @@ type AuthHandler struct {
 	tokenStore store.RefreshTokenStore
 }
 
+const defaultRoleName = "user"
+
 func NewAuthHandler(cfg config.Config, tokenStore store.RefreshTokenStore) *AuthHandler {
 	return &AuthHandler{cfg: cfg, tokenStore: tokenStore}
 }
 
 func (h *AuthHandler) RegisterHandler(w http.ResponseWriter, r *http.Request) error {
 	w.Header().Set("Content-Type", "application/json")
-	var user models.Users
+	var user models.User
 	if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
 		return middleware.NewAppError(http.StatusBadRequest, "Invalid request payload", err)
 	}
@@ -50,17 +53,46 @@ func (h *AuthHandler) RegisterHandler(w http.ResponseWriter, r *http.Request) er
 		return middleware.NewAppError(http.StatusBadRequest, "Username and password are required", nil)
 	}
 
+	roleName := strings.TrimSpace(user.Role)
+	if roleName == "" {
+		roleName = defaultRoleName
+	}
+
 	hashedPassword, err := generateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	if err != nil {
 		log.Printf("Error hashing password: %v", err)
 		return middleware.NewAppError(http.StatusInternalServerError, "Internal server error", err)
 	}
 
-	_, err = db.DB.Exec("INSERT INTO users (username, password, role) VALUES ($1, $2, $3)",
-		user.Username, string(hashedPassword), user.Role)
+	tx, err := db.DB.Begin()
 	if err != nil {
+		log.Printf("Error creating transaction: %v", err)
+		return middleware.NewAppError(http.StatusInternalServerError, "Internal server error", err)
+	}
+
+	var roleID string
+	if err := tx.QueryRow("SELECT id FROM roles WHERE name = $1", roleName).Scan(&roleID); err != nil {
+		_ = tx.Rollback()
+		if err == sql.ErrNoRows {
+			return middleware.NewAppError(http.StatusBadRequest, "Invalid role", err)
+		}
+		log.Printf("Error loading role: %v", err)
+		return middleware.NewAppError(http.StatusInternalServerError, "Internal server error", err)
+	}
+
+	email := sql.NullString{String: user.Email, Valid: user.Email != ""}
+
+	_, err = tx.Exec("INSERT INTO users (username, email, password_hash, role_id) VALUES ($1, $2, $3, $4)",
+		user.Username, email, string(hashedPassword), roleID)
+	if err != nil {
+		_ = tx.Rollback()
 		log.Printf("Error inserting user into database: %v", err)
 		return middleware.NewAppError(http.StatusConflict, "User already exists or database error", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("Error committing transaction: %v", err)
+		return middleware.NewAppError(http.StatusInternalServerError, "Internal server error", err)
 	}
 
 	w.WriteHeader(http.StatusCreated)
@@ -70,7 +102,7 @@ func (h *AuthHandler) RegisterHandler(w http.ResponseWriter, r *http.Request) er
 
 func (h *AuthHandler) LoginHandler(w http.ResponseWriter, r *http.Request) error {
 	w.Header().Set("Content-Type", "application/json")
-	var user models.Users
+	var user models.User
 	if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
 		return middleware.NewAppError(http.StatusBadRequest, "Invalid request payload", err)
 	}
@@ -80,7 +112,7 @@ func (h *AuthHandler) LoginHandler(w http.ResponseWriter, r *http.Request) error
 	}
 
 	var storedPassword, role string
-	err := db.DB.QueryRow("SELECT password, role FROM users WHERE username = $1", user.Username).Scan(&storedPassword, &role)
+	err := db.DB.QueryRow("SELECT u.password_hash, r.name FROM users u JOIN roles r ON r.id = u.role_id WHERE u.username = $1", user.Username).Scan(&storedPassword, &role)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return middleware.NewAppError(http.StatusUnauthorized, "Invalid username or password", err)
