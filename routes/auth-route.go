@@ -11,12 +11,15 @@ import (
 func SetupRoutes(cfg config.Config, authHandler *handlers.AuthHandler) *mux.Router {
 	router := mux.NewRouter()
 
-	router.HandleFunc("/register", middleware.ErrorHandler(authHandler.RegisterHandler)).Methods("POST")
-	router.HandleFunc("/login", middleware.ErrorHandler(authHandler.LoginHandler)).Methods("POST")
-	router.HandleFunc("/refresh", middleware.ErrorHandler(authHandler.RefreshHandler)).Methods("POST")
-	router.HandleFunc("/logout", middleware.ErrorHandler(authHandler.LogoutHandler)).Methods("POST")
-	router.Handle("/authenticate", middleware.AuthMiddleware(cfg)(middleware.ErrorHandler(authHandler.AuthenticateHandler))).Methods("GET")
-	router.HandleFunc("/health", handlers.HealthHandler).Methods("GET")
+	apiRouter := router.PathPrefix("/api/v1").Subrouter()
+	authRouter := apiRouter.PathPrefix("/auth").Subrouter()
+
+	authRouter.HandleFunc("/register", middleware.ErrorHandler(authHandler.RegisterHandler)).Methods("POST")
+	authRouter.HandleFunc("/login", middleware.ErrorHandler(authHandler.LoginHandler)).Methods("POST")
+	authRouter.HandleFunc("/refresh", middleware.ErrorHandler(authHandler.RefreshHandler)).Methods("POST")
+	authRouter.HandleFunc("/logout", middleware.ErrorHandler(authHandler.LogoutHandler)).Methods("POST")
+	authRouter.Handle("/authenticate", middleware.AuthMiddleware(cfg)(middleware.ErrorHandler(authHandler.AuthenticateHandler))).Methods("GET")
+	apiRouter.HandleFunc("/health", handlers.HealthHandler).Methods("GET")
 
 	return router
 }

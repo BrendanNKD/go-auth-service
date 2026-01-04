@@ -28,12 +28,12 @@ func TestSetupRoutes(t *testing.T) {
 		method string
 		path   string
 	}{
-		{"POST", "/register"},
-		{"POST", "/login"},
-		{"POST", "/logout"},
-		{"POST", "/refresh"},
-		{"GET", "/authenticate"},
-		{"GET", "/health"},
+		{"POST", "/api/v1/auth/register"},
+		{"POST", "/api/v1/auth/login"},
+		{"POST", "/api/v1/auth/logout"},
+		{"POST", "/api/v1/auth/refresh"},
+		{"GET", "/api/v1/auth/authenticate"},
+		{"GET", "/api/v1/health"},
 	}
 
 	for _, tt := range tests {
