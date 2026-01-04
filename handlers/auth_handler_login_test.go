@@ -46,13 +46,13 @@ func TestLoginHandlerIssueTokensError(t *testing.T) {
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte("password"), bcrypt.DefaultCost)
 	assert.NoError(t, err)
 
-	mock.ExpectQuery(`SELECT password, role FROM users WHERE username = \$1`).
+	mock.ExpectQuery(`SELECT u.password_hash, r.name FROM users u JOIN roles r ON r.id = u.role_id WHERE u.username = \$1`).
 		WithArgs("testuser").
 		WillReturnRows(sqlmock.NewRows([]string{"password", "role"}).
 			AddRow(string(hashedPassword), "jobseeker"))
 
 	handler := NewAuthHandler(configForTests(), &trackingTokenStore{})
-	user := models.Users{Username: "testuser", Password: "password"}
+	user := models.User{Username: "testuser", Password: "password"}
 	body, _ := json.Marshal(user)
 
 	req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewBuffer(body))
