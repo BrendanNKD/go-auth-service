@@ -116,12 +116,14 @@ func TestRegisterHandler(t *testing.T) {
 	mock, cleanup := setupMockDB()
 	defer cleanup()
 
+	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT id FROM roles WHERE name = \\$1").
 		WithArgs("jobseeker").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("role-id"))
 	mock.ExpectExec("INSERT INTO users").
 		WithArgs("testuser", sqlmock.AnyArg(), sqlmock.AnyArg(), "role-id").
 		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
 
 	handler := handlers.NewAuthHandler(testConfig(), newStubTokenStore())
 	user := models.User{Username: "testuser", Password: "password", Role: "jobseeker"}
