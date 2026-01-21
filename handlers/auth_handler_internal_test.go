@@ -149,12 +149,14 @@ func TestRegisterHandlerDBError(t *testing.T) {
 	mock, cleanup := setupMockDB(t)
 	defer cleanup()
 
+	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT id FROM roles WHERE name = \\$1").
 		WithArgs("user").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("role-id"))
 	mock.ExpectExec("INSERT INTO users").
 		WithArgs("user", sqlmock.AnyArg(), sqlmock.AnyArg(), "role-id").
 		WillReturnError(errors.New("db error"))
+	mock.ExpectRollback()
 
 	body, _ := json.Marshal(models.User{Username: "user", Password: "pass"})
 	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewBuffer(body))
