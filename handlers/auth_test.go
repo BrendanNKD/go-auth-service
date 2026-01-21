@@ -14,6 +14,7 @@ import (
 	"auth-service/config"
 	"auth-service/db"
 	"auth-service/handlers"
+	"auth-service/middleware"
 	"auth-service/models"
 	"auth-service/store"
 	"auth-service/utils"
