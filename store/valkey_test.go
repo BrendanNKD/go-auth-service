@@ -3,6 +3,7 @@ package store
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -188,8 +189,142 @@ func TestValkeyStoreGetTokenInvalidJSON(t *testing.T) {
 	})
 	defer cleanup()
 
-	store := &ValkeyStore{addr: addr, prefix: "prefix"}
+	store := &ValkeyStore{addr: addr, prefix: "prefix", timeout: 5 * time.Second}
 	_, _, err := store.GetToken(context.Background(), "token")
+	assert.Error(t, err)
+}
+
+func TestValkeyStoreGetSessionInvalidJSON(t *testing.T) {
+	addr, cleanup := startValkeyServer(t, func(args []string) string {
+		if strings.ToUpper(args[0]) == "GET" {
+			return "$7\r\ninvalid\r\n"
+		}
+		return "+OK\r\n"
+	})
+	defer cleanup()
+
+	store := &ValkeyStore{addr: addr, prefix: "prefix", timeout: 5 * time.Second}
+	_, _, err := store.GetSession(context.Background(), "session")
+	assert.Error(t, err)
+}
+
+func TestValkeyStoreGetTokenEmptyResponse(t *testing.T) {
+	addr, cleanup := startValkeyServer(t, func(args []string) string {
+		if strings.ToUpper(args[0]) == "GET" {
+			return "$-1\r\n"
+		}
+		return "+OK\r\n"
+	})
+	defer cleanup()
+
+	store := &ValkeyStore{addr: addr, prefix: "prefix", timeout: 5 * time.Second}
+	_, found, err := store.GetToken(context.Background(), "token")
+	assert.NoError(t, err)
+	assert.False(t, found)
+}
+
+func TestValkeyStoreGetSessionEmptyResponse(t *testing.T) {
+	addr, cleanup := startValkeyServer(t, func(args []string) string {
+		if strings.ToUpper(args[0]) == "GET" {
+			return "$-1\r\n"
+		}
+		return "+OK\r\n"
+	})
+	defer cleanup()
+
+	store := &ValkeyStore{addr: addr, prefix: "prefix", timeout: 5 * time.Second}
+	_, found, err := store.GetSession(context.Background(), "session")
+	assert.NoError(t, err)
+	assert.False(t, found)
+}
+
+func TestValkeyStoreIsRevokedEmptyResponse(t *testing.T) {
+	addr, cleanup := startValkeyServer(t, func(args []string) string {
+		if strings.ToUpper(args[0]) == "GET" {
+			return "$-1\r\n"
+		}
+		return "+OK\r\n"
+	})
+	defer cleanup()
+
+	store := &ValkeyStore{addr: addr, prefix: "prefix", timeout: 5 * time.Second}
+	_, revoked, err := store.IsRevoked(context.Background(), "token")
+	assert.NoError(t, err)
+	assert.False(t, revoked)
+}
+
+func TestValkeyStoreGetSessionDoError(t *testing.T) {
+	store := &ValkeyStore{addr: "127.0.0.1:1", prefix: "prefix"}
+	_, _, err := store.GetSession(context.Background(), "session")
+	assert.Error(t, err)
+}
+
+func TestValkeyStoreSaveTokenMarshalError(t *testing.T) {
+	originalMarshal := jsonMarshal
+	jsonMarshal = func(v interface{}) ([]byte, error) {
+		return nil, errors.New("marshal error")
+	}
+	defer func() { jsonMarshal = originalMarshal }()
+
+	store := &ValkeyStore{addr: "ignored", prefix: "prefix"}
+	err := store.SaveToken(context.Background(), "token", RefreshTokenMetadata{}, time.Second)
+	assert.Error(t, err)
+}
+
+func TestValkeyStoreSaveTokenDoError(t *testing.T) {
+	store := &ValkeyStore{addr: "127.0.0.1:1", prefix: "prefix"}
+	err := store.SaveToken(context.Background(), "token", RefreshTokenMetadata{}, time.Second)
+	assert.Error(t, err)
+}
+
+func TestValkeyStoreSaveSessionMarshalError(t *testing.T) {
+	originalMarshal := jsonMarshal
+	jsonMarshal = func(v interface{}) ([]byte, error) {
+		return nil, errors.New("marshal error")
+	}
+	defer func() { jsonMarshal = originalMarshal }()
+
+	store := &ValkeyStore{addr: "ignored", prefix: "prefix"}
+	err := store.SaveSession(context.Background(), "session", RefreshSession{}, time.Second)
+	assert.Error(t, err)
+}
+
+func TestValkeyStoreSaveSessionDoError(t *testing.T) {
+	store := &ValkeyStore{addr: "127.0.0.1:1", prefix: "prefix"}
+	err := store.SaveSession(context.Background(), "session", RefreshSession{}, time.Second)
+	assert.Error(t, err)
+}
+
+func TestValkeyStoreIsRevokedDoError(t *testing.T) {
+	store := &ValkeyStore{addr: "127.0.0.1:1", prefix: "prefix"}
+	_, _, err := store.IsRevoked(context.Background(), "token")
+	assert.Error(t, err)
+}
+
+func TestValkeyStoreDoWithDeadline(t *testing.T) {
+	addr, cleanup := startValkeyServer(t, func(args []string) string {
+		return "+OK\r\n"
+	})
+	defer cleanup()
+
+	store := &ValkeyStore{addr: addr, prefix: "prefix", timeout: 5 * time.Second}
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(5*time.Second))
+	defer cancel()
+
+	resp, err := store.do(ctx, "PING")
+	assert.NoError(t, err)
+	assert.Equal(t, "OK", resp)
+}
+
+func TestValkeyStoreDoFlushError(t *testing.T) {
+	originalDial := dialContext
+	dialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		return &stubConn{writeErr: errors.New("write error")}, nil
+	}
+	defer func() { dialContext = originalDial }()
+
+	store := &ValkeyStore{addr: "ignored", timeout: 5 * time.Second}
+	_, err := store.do(context.Background(), "PING")
 	assert.Error(t, err)
 }
 
