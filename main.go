@@ -27,6 +27,12 @@ var (
 	listenAndServe = http.ListenAndServe
 	getSecret      = secretmanager.GetSecret
 	logFatal       = log.Fatal
+	setEnv         = func(key, value string) error {
+		if err := os.Setenv(key, value); err != nil {
+			return fmt.Errorf("set env %s: %w", key, err)
+		}
+		return nil
+	}
 )
 
 const (
@@ -56,13 +62,6 @@ func loadSecretMap(secretName string) (map[string]string, error) {
 		return nil, err
 	}
 	return secrets, nil
-}
-
-func setEnv(key, value string) error {
-	if err := os.Setenv(key, value); err != nil {
-		return fmt.Errorf("set env %s: %w", key, err)
-	}
-	return nil
 }
 
 func setEnvFromMap(values map[string]string) error {

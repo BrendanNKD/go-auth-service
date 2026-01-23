@@ -29,6 +29,8 @@ var (
 	dialContext    = (&net.Dialer{}).DialContext
 	newBufioReader = bufio.NewReader
 	newBufioWriter = bufio.NewWriter
+	jsonMarshal    = json.Marshal
+	jsonUnmarshal  = json.Unmarshal
 )
 
 type ValkeyStore struct {
@@ -73,7 +75,7 @@ func NewValkeyStore(cfg config.ValkeyConfig) (*ValkeyStore, error) {
 
 func (v *ValkeyStore) SaveToken(ctx context.Context, tokenHash string, metadata RefreshTokenMetadata, ttl time.Duration) error {
 	seconds := strconv.FormatInt(int64(ttl.Seconds()), 10)
-	payload, err := json.Marshal(metadata)
+	payload, err := jsonMarshal(metadata)
 	if err != nil {
 		return err
 	}
@@ -90,7 +92,7 @@ func (v *ValkeyStore) GetToken(ctx context.Context, tokenHash string) (RefreshTo
 		return RefreshTokenMetadata{}, false, nil
 	}
 	var metadata RefreshTokenMetadata
-	if err := json.Unmarshal([]byte(response), &metadata); err != nil {
+	if err := jsonUnmarshal([]byte(response), &metadata); err != nil {
 		return RefreshTokenMetadata{}, false, err
 	}
 	return metadata, true, nil
@@ -103,7 +105,7 @@ func (v *ValkeyStore) RevokeToken(ctx context.Context, tokenHash string) error {
 
 func (v *ValkeyStore) SaveSession(ctx context.Context, sessionID string, session RefreshSession, ttl time.Duration) error {
 	seconds := strconv.FormatInt(int64(ttl.Seconds()), 10)
-	payload, err := json.Marshal(session)
+	payload, err := jsonMarshal(session)
 	if err != nil {
 		return err
 	}
@@ -120,7 +122,7 @@ func (v *ValkeyStore) GetSession(ctx context.Context, sessionID string) (Refresh
 		return RefreshSession{}, false, nil
 	}
 	var session RefreshSession
-	if err := json.Unmarshal([]byte(response), &session); err != nil {
+	if err := jsonUnmarshal([]byte(response), &session); err != nil {
 		return RefreshSession{}, false, err
 	}
 	return session, true, nil
