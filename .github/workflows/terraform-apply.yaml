@@ -1,0 +1,39 @@
+name: Terraform - Apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type APPLY to confirm Terraform apply"
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  apply:
+    if: ${{ github.event.inputs.confirm == 'APPLY' }}
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ap-southeast-1
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      TERRAFORM_DIR: infra/terraform
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup AWS Credentials Using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: terraform -chdir=${{ env.TERRAFORM_DIR }} init
+
+      - name: Terraform Apply
+        run: terraform -chdir=${{ env.TERRAFORM_DIR }} apply -auto-approve

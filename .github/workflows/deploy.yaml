@@ -1,0 +1,188 @@
+name: Deploy - ECS
+
+on:
+  workflow_run:
+    workflows:
+      - Build - Publish Image
+    types:
+      - completed
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  preflight:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: ap-southeast-1
+      ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+      ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
+      ECS_TASK_DEFINITION: ${{ secrets.ECS_TASK_DEFINITION }}
+      ECS_CONTAINER_NAME: ${{ secrets.ECS_CONTAINER_NAME }}
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      ECS_ECR_REPOSITORY: ${{ secrets.ECS_ECR_REPOSITORY }}
+    steps:
+      - name: Setup AWS Credentials Using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify ECR Repository Exists
+        run: |
+          if ! aws ecr describe-repositories --repository-names "${{ env.ECS_ECR_REPOSITORY }}" >/dev/null 2>&1; then
+            echo "::error::ECR repository '${{ env.ECS_ECR_REPOSITORY }}' not found."
+            echo "Create it via Terraform or IaC, then re-run the pipeline."
+            exit 1
+          fi
+
+      - name: Verify ECS Cluster Exists
+        run: |
+          status=$(aws ecs describe-clusters --clusters "${{ env.ECS_CLUSTER }}" --query 'clusters[0].status' --output text 2>/dev/null || true)
+          if [ "$status" != "ACTIVE" ]; then
+            echo "::error::ECS cluster '${{ env.ECS_CLUSTER }}' not found or inactive."
+            echo "Create it via Terraform or IaC, then re-run the pipeline."
+            exit 1
+          fi
+
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    needs: preflight
+    env:
+      AWS_REGION: ap-southeast-1
+      ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+      ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
+      ECS_TASK_DEFINITION: ${{ secrets.ECS_TASK_DEFINITION }}
+      ECS_CONTAINER_NAME: ${{ secrets.ECS_CONTAINER_NAME }}
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      SERVICE_HEALTHCHECK_URL: ${{ secrets.SERVICE_HEALTHCHECK_URL }}
+      ECS_BOOTSTRAP_STACK: ${{ secrets.ECS_BOOTSTRAP_STACK }}
+      ECS_VPC_ID: ${{ secrets.ECS_VPC_ID }}
+      ECS_SUBNETS: ${{ secrets.ECS_SUBNETS }}
+      ECS_SECURITY_GROUPS: ${{ secrets.ECS_SECURITY_GROUPS }}
+      ECS_TASK_EXEC_ROLE_ARN: ${{ secrets.ECS_TASK_EXEC_ROLE_ARN }}
+      ECS_TASK_ROLE_ARN: ${{ secrets.ECS_TASK_ROLE_ARN }}
+      ECS_ECR_REPOSITORY: ${{ secrets.ECS_ECR_REPOSITORY }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup AWS Credentials Using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download Image Metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: image-metadata
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Read Image Metadata
+        id: image
+        run: |
+          image=$(jq -r '.image' image.json)
+          version=$(jq -r '.version' image.json)
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Bootstrap ECS Service (IaC)
+        if: env.ECS_BOOTSTRAP_STACK != ''
+        run: |
+          aws cloudformation deploy \
+            --stack-name "${{ env.ECS_BOOTSTRAP_STACK }}" \
+            --template-file infra/cloudformation/ecs-service.yaml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              ClusterName="${{ env.ECS_CLUSTER }}" \
+              ServiceName="${{ env.ECS_SERVICE }}" \
+              TaskFamily="${{ env.ECS_TASK_DEFINITION }}" \
+              ContainerName="${{ env.ECS_CONTAINER_NAME }}" \
+              ContainerImage="${{ steps.image.outputs.image }}" \
+              EcrRepositoryName="${{ env.ECS_ECR_REPOSITORY }}" \
+              ContainerPort=8080 \
+              DesiredCount=1 \
+              VpcId="${{ env.ECS_VPC_ID }}" \
+              Subnets="${{ env.ECS_SUBNETS }}" \
+              SecurityGroupIds="${{ env.ECS_SECURITY_GROUPS }}" \
+              ExecutionRoleArn="${{ env.ECS_TASK_EXEC_ROLE_ARN }}" \
+              TaskRoleArn="${{ env.ECS_TASK_ROLE_ARN }}"
+
+      - name: Get Current Task Definition JSON
+        run: |
+          aws ecs describe-task-definition --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+            --query 'taskDefinition' > current-task-definition.json
+
+      - name: Update Container Image in Task Definition
+        run: |
+          jq --arg IMAGE "${{ steps.image.outputs.image }}" \
+            --arg CONTAINER "${{ env.ECS_CONTAINER_NAME }}" '
+            .containerDefinitions |= map(if .name == $CONTAINER then .image = $IMAGE else . end) |
+            del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)
+          ' current-task-definition.json > new-task-definition.json
+
+      - name: Register New Task Definition
+        run: |
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json file://new-task-definition.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "NEW_TASK_DEF_ARN=$NEW_TASK_DEF_ARN" >> $GITHUB_ENV
+
+      - name: Update ECS Service
+        run: |
+          aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE }} --force-new-deployment --task-definition $NEW_TASK_DEF_ARN
+
+      - name: Wait for ECS Service Stability
+        run: aws ecs wait services-stable --cluster ${{ env.ECS_CLUSTER }} --services ${{ env.ECS_SERVICE }}
+
+      - name: Production Health Check
+        if: env.SERVICE_HEALTHCHECK_URL != ''
+        run: |
+          echo "Checking service health at ${{ env.SERVICE_HEALTHCHECK_URL }}"
+          curl --fail ${{ env.SERVICE_HEALTHCHECK_URL }}
+
+      - name: Update README with Release Info
+        if: github.actor != 'github-actions[bot]'
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          readme = Path("README.md")
+          if not readme.exists():
+            readme.write_text("# JB Auth Service\n\n## Release Information\n\n<!-- release-start -->\n<!-- release-end -->\n")
+
+          content = readme.read_text()
+          version = "${{ steps.image.outputs.version }}"
+          date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+          block = f"<!-- release-start -->\n- Latest version: {version}\n- Release date (UTC): {date}\n<!-- release-end -->"
+
+          if "<!-- release-start -->" in content and "<!-- release-end -->" in content:
+            before = content.split("<!-- release-start -->")[0]
+            after = content.split("<!-- release-end -->")[-1]
+            updated = f"{before}{block}{after}"
+          else:
+            updated = f"{content.rstrip()}\n\n## Release Information\n\n{block}\n"
+          readme.write_text(updated)
+          PY
+
+      - name: Commit README Update
+        if: github.actor != 'github-actions[bot]'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          if git diff --cached --quiet; then
+            echo "No README changes to commit."
+            exit 0
+          fi
+          git commit -m "docs: update release info [skip ci]"
+          git push

@@ -1,56 +1,120 @@
-name: CI Test, Build and Security Workflow
+name: CI - Checks
 
 on:
   pull_request:
     branches:
+      - main
+  push:
+    branches:
+      - main
       - feat/**
       - fix/**
       - breaking/**
-      - main
 
 permissions:
-  contents: write
-  security-events: write  # Required for SARIF upload
-  pull-requests: read  # Required for scanning PR commits
+  contents: read
+  security-events: write
 
 jobs:
   test_build_security:
     runs-on: ubuntu-latest
     env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      APP_PORT: ${{ secrets.APP_PORT }}
       DB_HOST: ${{ secrets.DB_HOST }}
       DB_PORT: ${{ secrets.DB_PORT }}
       DB_USERNAME: ${{ secrets.DB_USERNAME }}
       DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
       DB_INSTANCE_IDENTIFIER: ${{ secrets.DB_INSTANCE_IDENTIFIER }}
-      DB_ENGINE: ${{ secrets.DB_ENGINE}}
+      DB_ENGINE: ${{ secrets.DB_ENGINE }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+      DB_SSLMODE: ${{ secrets.DB_SSLMODE }}
       JWT_SECRET: ${{ secrets.JWT_SECRET }}
       JWT_EXPIRE_HOURS: ${{ secrets.JWT_EXPIRE_HOURS }}
-      APP_PORT: ${{ secrets.APP_PORT }}
       APP_ENV: ${{ secrets.APP_ENV }}
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Ensures full commit history
-          ref: ${{ github.event.pull_request.head.sha }}  # Ensures correct PR commit is checked out
+          fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.23.2'
+          go-version-file: go.mod
+          cache: true
 
-      - name: Install Dependencies
-        run: go mod tidy
+      - name: Download Dependencies
+        run: go mod download
 
-      # --- SECRET SCANNING (Fixed Gitleaks) ---
+      - name: Run Go Vet
+        run: go vet ./...
+
+      - name: Run Unit Tests
+        run: |
+          go test ./... -json -coverprofile=coverage.out > test-report.json
+
+      - name: Upload Unit Test Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-test-report
+          path: |
+            test-report.json
+            coverage.out
+
       - name: Run Gitleaks Secret Scanning
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true  # Prevents workflow failure if secrets are found
+        with:
+          args: --report-format sarif --report-path gitleaks.sarif
+
+      - name: Upload Gitleaks Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: gitleaks.sarif
+
+      - name: Run Trivy Repository Scan
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          security-checks: vuln,secret,config
+          ignore-unfixed: true
+          exit-code: "1"
+          format: sarif
+          output: trivy-fs.sarif
+
+      - name: Upload Trivy Repository Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs-report
+          path: trivy-fs.sarif
+
+      - name: Build Docker Image
+        run: docker build -t authservice:ci .
+
+      - name: Run Trivy Image Scan
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: authservice:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: sarif
+          output: trivy-image.sarif
+
+      - name: Upload Trivy Image Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-report
+          path: trivy-image.sarif
 
       - name: Run Snyk to check for vulnerabilities
+        if: env.SNYK_TOKEN != ''
         uses: snyk/actions/golang@master
         continue-on-error: true
         env:
@@ -58,46 +122,15 @@ jobs:
         with:
           args: --sarif-file-output=snyk.sarif
 
-      # --- UPLOAD SARIF RESULTS TO GITHUB SECURITY ---
       - name: Upload Snyk results to GitHub Code Scanning
+        if: env.SNYK_TOKEN != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk.sarif
 
-      # --- UNIT TESTING & BUILD ---
-      - name: Run Unit Tests
-        run: go test ./... -cover -v
-
-      - name: Build Backend Service
-        run: go build -o backend main.go
-
-      # --- INSTALL TRIVY ---
-      - name: Install Trivy
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wget
-          wget -qO- https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo tee /etc/apt/trusted.gpg.d/trivy.asc
-          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update
-          sudo apt-get install -y trivy
-
-      # --- CONTAINER SCANNING (Trivy) ---
-      - name: Build and Scan Docker Image
-        run: |
-          docker build -t my-app .
-          trivy image --exit-code 0 --severity HIGH,CRITICAL my-app
-
-      - name: Start Backend Service
-        run: |
-          echo "Starting the backend service..."
-          ./backend &
-          sleep 5  
-
-      - name: Health Check
-        run: |
-          echo "Checking service health..."
-          curl --fail http://localhost:${{ env.APP_PORT }}/health || (echo "Health check failed!" && exit 1)
-
-      - name: Cleanup Build Directory
-        if: ${{ success() }}
-        run: rm -f backend
+      - name: Upload Snyk Report
+        if: env.SNYK_TOKEN != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-report
+          path: snyk.sarif

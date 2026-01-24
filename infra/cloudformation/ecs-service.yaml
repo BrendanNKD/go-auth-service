@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: ECS + ECR bootstrap for jb-auth-service (cluster, repo, task definition, service).
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: jb-auth-cluster
+  ServiceName:
+    Type: String
+  TaskFamily:
+    Type: String
+    Default: jb-auth-service
+  ContainerName:
+    Type: String
+    Default: auth-service
+  ContainerImage:
+    Type: String
+    Description: ECR image URI with tag
+  EcrRepositoryName:
+    Type: String
+    Default: nus/project/authservice
+  ContainerPort:
+    Type: Number
+    Default: 8080
+  DesiredCount:
+    Type: Number
+    Default: 1
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+  SecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+  ExecutionRoleArn:
+    Type: String
+    Description: ECS task execution role ARN
+  TaskRoleArn:
+    Type: String
+    Description: ECS task role ARN
+  LogGroupName:
+    Type: String
+    Default: /ecs/jb-auth-service
+
+Resources:
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref EcrRepositoryName
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      RetentionInDays: 30
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref TaskFamily
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !Ref ExecutionRoleArn
+      TaskRoleArn: !Ref TaskRoleArn
+      ContainerDefinitions:
+        - Name: !Ref ContainerName
+          Image: !Ref ContainerImage
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroupName
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: ecs
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - LogGroup
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: !Ref ServiceName
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: !Ref Subnets
+          SecurityGroups: !Ref SecurityGroupIds
+
+Outputs:
+  ClusterArn:
+    Value: !GetAtt Cluster.Arn
+  RepositoryUri:
+    Value: !GetAtt EcrRepository.RepositoryUri
+  TaskDefinitionArn:
+    Value: !Ref TaskDefinition
+  ServiceName:
+    Value: !Ref Service
