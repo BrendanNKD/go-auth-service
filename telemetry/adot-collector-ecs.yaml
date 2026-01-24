@@ -1,0 +1,43 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  resourcedetection:
+    detectors: [ecs, env]
+    timeout: 2s
+    override: false
+  batch: {}
+
+exporters:
+  awsxray: {}
+  awsemf:
+    region: ${AWS_REGION}
+    namespace: ${CW_METRIC_NAMESPACE}
+    log_group_name: ${CW_LOG_GROUP}
+    log_stream_name: ${CW_LOG_STREAM}
+    resource_to_telemetry_conversion:
+      enabled: true
+  prometheusremotewrite:
+    endpoint: ${AMP_ENDPOINT}
+    auth:
+      authenticator: sigv4auth
+
+extensions:
+  sigv4auth:
+    region: ${AWS_REGION}
+    service: aps
+
+service:
+  extensions: [sigv4auth]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [resourcedetection, batch]
+      exporters: [awsxray]
+    metrics:
+      receivers: [otlp]
+      processors: [resourcedetection, batch]
+      exporters: [awsemf, prometheusremotewrite]

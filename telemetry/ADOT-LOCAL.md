@@ -58,3 +58,9 @@ received spans/metrics because the config uses the `debug` exporter.
 
 Once you confirm local exports, swap the `debug` exporter in the collector
 config for AWS exporters (e.g., X-Ray, CloudWatch, AMP) and supply credentials.
+
+## ECS sidecar setup
+
+If you are running this service on ECS with a per-service ADOT sidecar,
+see [`telemetry/ADOT-ECS-SIDECAR.md`](ADOT-ECS-SIDECAR.md) for a task definition
+example and collector configuration that forwards to X-Ray, CloudWatch, and AMP.
