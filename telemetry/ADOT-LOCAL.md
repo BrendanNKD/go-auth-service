@@ -8,23 +8,10 @@ port `4318` so you can verify traces/metrics locally without sending data to AWS
 
 The repo includes a minimal config at `telemetry/adot-collector.yaml`.
 
-## 2) Run the ADOT collector in Docker or Podman
-
-Run the command from the **repo root** (so `$PWD/telemetry/adot-collector.yaml`
-resolves correctly). If you run it elsewhere, replace `$PWD/...` with the full
-path to `telemetry/adot-collector.yaml`.
+## 2) Run the ADOT collector in Docker
 
 ```bash
 docker run --rm --name adot-collector \
-  -p 4317:4317 \
-  -p 4318:4318 \
-  -v "$PWD/telemetry/adot-collector.yaml:/etc/otel-collector-config.yaml:ro" \
-  public.ecr.aws/aws-observability/aws-otel-collector:latest \
-  --config /etc/otel-collector-config.yaml
-```
-
-```bash
-podman run --rm --name adot-collector \
   -p 4317:4317 \
   -p 4318:4318 \
   -v "$PWD/telemetry/adot-collector.yaml:/etc/otel-collector-config.yaml:ro" \
@@ -52,9 +39,9 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=localhost:4317
 ## 4) Generate traffic
 
 Start the service and hit any HTTP route. The ADOT collector logs should show
-received spans/metrics because the config uses the `debug` exporter.
+received spans/metrics because the config uses the `logging` exporter.
 
 ## 5) Switching to AWS backends (optional)
 
-Once you confirm local exports, swap the `debug` exporter in the collector
+Once you confirm local exports, swap the `logging` exporter in the collector
 config for AWS exporters (e.g., X-Ray, CloudWatch, AMP) and supply credentials.
