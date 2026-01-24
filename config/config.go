@@ -85,8 +85,8 @@ func Load() (Config, error) {
 		dbName = os.Getenv("DB_INSTANCE_IDENTIFIER")
 	}
 
-	accessPrivateKeyPEM := os.Getenv("JWT_ACCESS_PRIVATE_KEY")
-	accessPublicKeyPEM := os.Getenv("JWT_ACCESS_PUBLIC_KEY")
+	accessPrivateKeyPEM := normalizePEMEnv(os.Getenv("JWT_ACCESS_PRIVATE_KEY"))
+	accessPublicKeyPEM := normalizePEMEnv(os.Getenv("JWT_ACCESS_PUBLIC_KEY"))
 	if accessPrivateKeyPEM == "" {
 		return Config{}, errors.New("JWT_ACCESS_PRIVATE_KEY must be set")
 	}
@@ -239,6 +239,13 @@ func parseRSAPublicKey(pemValue string) (*rsa.PublicKey, error) {
 		return nil, errors.New("JWT_ACCESS_PUBLIC_KEY is not RSA")
 	}
 	return publicKey, nil
+}
+
+func normalizePEMEnv(value string) string {
+	if value == "" {
+		return value
+	}
+	return strings.ReplaceAll(value, `\n`, "\n")
 }
 
 func getEnv(key, fallback string) string {
