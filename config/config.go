@@ -242,10 +242,19 @@ func parseRSAPublicKey(pemValue string) (*rsa.PublicKey, error) {
 }
 
 func normalizePEMEnv(value string) string {
+	value = strings.TrimSpace(value)
 	if value == "" {
 		return value
 	}
-	return strings.ReplaceAll(value, `\n`, "\n")
+	if (strings.HasPrefix(value, "\"") && strings.HasSuffix(value, "\"")) ||
+		(strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'")) {
+		value = value[1 : len(value)-1]
+	}
+	value = strings.ReplaceAll(value, `\r\n`, "\n")
+	value = strings.ReplaceAll(value, `\n`, "\n")
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	return value
 }
 
 func getEnv(key, fallback string) string {

@@ -115,3 +115,16 @@ func TestLoadHandlesEscapedNewlinesInKeys(t *testing.T) {
 	assert.NotNil(t, cfg.Auth.AccessTokenPrivateKey)
 	assert.NotNil(t, cfg.Auth.AccessTokenPublicKey)
 }
+
+func TestLoadHandlesQuotedEscapedNewlinesInKeys(t *testing.T) {
+	privateKeyPEM, publicKeyPEM := testKeyPair(t)
+	t.Setenv("JWT_ACCESS_PRIVATE_KEY", `"`+strings.ReplaceAll(privateKeyPEM, "\n", `\n`)+`"`)
+	t.Setenv("JWT_ACCESS_PUBLIC_KEY", `'`+strings.ReplaceAll(publicKeyPEM, "\n", `\n`)+`'`)
+	t.Setenv("DB_NAME", "auth")
+	t.Setenv("DB_USERNAME", "user")
+
+	cfg, err := Load()
+	assert.NoError(t, err)
+	assert.NotNil(t, cfg.Auth.AccessTokenPrivateKey)
+	assert.NotNil(t, cfg.Auth.AccessTokenPublicKey)
+}
