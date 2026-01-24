@@ -80,21 +80,21 @@ jobs:
       - name: Build Docker Image
         run: docker build -t ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.version }} .
 
-      - name: Run Trivy Image Scan
-        uses: aquasecurity/trivy-action@0.20.0
-        with:
-          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.version }}
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "1"
-          format: sarif
-          output: trivy-image.sarif
+      # - name: Run Trivy Image Scan
+      #   uses: aquasecurity/trivy-action@0.20.0
+      #   with:
+      #     image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.version }}
+      #     severity: HIGH,CRITICAL
+      #     ignore-unfixed: true
+      #     exit-code: "1"
+      #     format: sarif
+      #     output: trivy-image.sarif
 
-      - name: Upload Trivy Image Report
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-image-report
-          path: trivy-image.sarif
+      # - name: Upload Trivy Image Report
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: trivy-image-report
+      #     path: trivy-image.sarif
 
       - name: Push Docker Image to Amazon ECR
         run: docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.version }}

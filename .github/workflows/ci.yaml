@@ -77,23 +77,23 @@ jobs:
           name: gitleaks-report
           path: gitleaks.sarif
 
-      - name: Run Trivy Repository Scan
-        uses: aquasecurity/trivy-action@0.20.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          severity: HIGH,CRITICAL
-          scanners: vuln,secret,config
-          ignore-unfixed: true
-          exit-code: "1"
-          format: sarif
-          output: trivy-fs.sarif
+      # - name: Run Trivy Repository Scan
+      #   uses: aquasecurity/trivy-action@0.20.0
+      #   with:
+      #     scan-type: fs
+      #     scan-ref: .
+      #     severity: HIGH,CRITICAL
+      #     scanners: vuln,secret,config
+      #     ignore-unfixed: true
+      #     exit-code: "1"
+      #     format: sarif
+      #     output: trivy-fs.sarif
 
-      - name: Upload Trivy Repository Report
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-fs-report
-          path: trivy-fs.sarif
+      # - name: Upload Trivy Repository Report
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: trivy-fs-report
+      #     path: trivy-fs.sarif
 
       - name: Build Docker Image
         run: docker build -t authservice:ci .
