@@ -1,21 +1,31 @@
-# Dockerfile
-FROM golang:1.23.2-alpine
+# syntax=docker/dockerfile:1
 
-WORKDIR /app
+ARG GO_VERSION=1.24.0
+ARG ALPINE_VERSION=3.20
 
-# Install necessary dependencies
-RUN apk add --no-cache git
+FROM golang:${GO_VERSION}-alpine AS builder
 
-# Copy project files
+WORKDIR /src
+
+RUN apk add --no-cache ca-certificates git
+
+COPY go.mod go.sum ./
+RUN go mod download
+
 COPY . .
 
-# Download Go modules
-RUN go mod tidy
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags="-s -w" -o /out/auth-service main.go
 
-# Build the application
-RUN go build -o auth-service main.go
+FROM alpine:${ALPINE_VERSION} AS runtime
 
-# Expose port 8080 for the API
+RUN apk add --no-cache ca-certificates \
+    && adduser -D -g '' appuser
+
+WORKDIR /app
+COPY --from=builder /out/auth-service /app/auth-service
+
 EXPOSE 8080
 
-CMD ["./auth-service"]
+USER appuser
+ENTRYPOINT ["/app/auth-service"]
