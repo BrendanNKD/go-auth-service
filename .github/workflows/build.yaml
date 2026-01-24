@@ -50,10 +50,12 @@ jobs:
           merge_source=$(echo "$commit_message" | sed -n 's/.*from .*\/\([^ ]*\).*/\1/p')
 
           bump="patch"
-          if echo "$commit_message" | grep -Eiq 'breaking|BREAKING CHANGE' || echo "$merge_source" | grep -Eiq '^breaking/'; then
+          if echo "$commit_message" | grep -Eiq 'breaking|BREAKING CHANGE' || echo "$merge_source" | grep -Eiq '^(breaking|major)/'; then
             bump="major"
-          elif echo "$commit_message" | grep -Eiq 'feat' || echo "$merge_source" | grep -Eiq '^feat/'; then
+          elif echo "$commit_message" | grep -Eiq 'feat' || echo "$merge_source" | grep -Eiq '^(feat|minor)/'; then
             bump="minor"
+          elif echo "$merge_source" | grep -Eiq '^(fix|patch)/'; then
+            bump="patch"
           fi
 
           case "$bump" in
