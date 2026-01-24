@@ -108,11 +108,11 @@ jobs:
           format: sarif
           output: trivy-image.sarif
 
-      - name: Upload Trivy Image Report
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-image-report
-          path: trivy-image.sarif
+      # - name: Upload Trivy Image Report
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: trivy-image-report
+      #     path: trivy-image.sarif
 
       - name: Run Snyk to check for vulnerabilities
         if: env.SNYK_TOKEN != ''
