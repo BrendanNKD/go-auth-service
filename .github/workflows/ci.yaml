@@ -9,6 +9,7 @@ on:
       - main
       - feat/**
       - fix/**
+      - minor/**
       - breaking/**
 
 permissions:
@@ -82,7 +83,7 @@ jobs:
           scan-type: fs
           scan-ref: .
           severity: HIGH,CRITICAL
-          security-checks: vuln,secret,config
+          scanners: vuln,secret,config
           ignore-unfixed: true
           exit-code: "1"
           format: sarif
