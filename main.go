@@ -4,18 +4,23 @@ import (
 	"auth-service/config"
 	"auth-service/db"
 	"auth-service/handlers"
+	"auth-service/middleware"
 	"auth-service/routes"
 	"auth-service/secretmanager" // Ensure this is available in production.
 	"auth-service/store"
+	"auth-service/telemetry"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	gorillaHandlers "github.com/gorilla/handlers"
 	"github.com/joho/godotenv"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 var (
@@ -184,6 +189,18 @@ func run() error {
 		return fmt.Errorf("configuration error: %w", err)
 	}
 
+	shutdownTelemetry, err := telemetry.Init(context.Background(), cfg)
+	if err != nil {
+		return fmt.Errorf("telemetry init error: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTelemetry(shutdownCtx); err != nil {
+			log.Printf("telemetry shutdown error: %v", err)
+		}
+	}()
+
 	if err := connectDB(cfg.DB); err != nil {
 		return err
 	}
@@ -197,7 +214,8 @@ func run() error {
 	authHandler := handlers.NewAuthHandler(cfg, valkeyStore)
 	router := setupRoutes(cfg, authHandler)
 
-	corsHandler := buildCORSHandler(cfg, router)
+	otelHandler := otelhttp.NewHandler(middleware.RequestLogger(router), "http.server")
+	corsHandler := buildCORSHandler(cfg, otelHandler)
 
 	port := cfg.Port
 	if port == "" {
