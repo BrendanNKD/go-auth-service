@@ -14,13 +14,14 @@ import (
 )
 
 type Config struct {
-	AppEnv string
-	Port   string
-	DB     DatabaseConfig
-	Auth   AuthConfig
-	Cookie CookieConfig
-	CORS   CORSConfig
-	Valkey ValkeyConfig
+	AppEnv    string
+	Port      string
+	DB        DatabaseConfig
+	Auth      AuthConfig
+	Cookie    CookieConfig
+	CORS      CORSConfig
+	Valkey    ValkeyConfig
+	Telemetry TelemetryConfig
 }
 
 type DatabaseConfig struct {
@@ -62,6 +63,19 @@ type ValkeyConfig struct {
 	Prefix   string
 }
 
+type TelemetryConfig struct {
+	OTLPEndpoint         string
+	OTLPTracesEndpoint   string
+	OTLPMetricsEndpoint  string
+	OTLPProtocol         string
+	OTLPHeaders          map[string]string
+	OTLPInsecure         bool
+	ExportTimeout        time.Duration
+	MetricExportInterval time.Duration
+	ServiceName          string
+	ServiceVersion       string
+}
+
 func Load() (Config, error) {
 	appEnv := getEnv("APP_ENV", "dev")
 	port := getEnv("APP_PORT", "8080")
@@ -97,6 +111,19 @@ func Load() (Config, error) {
 	valkeyDB, err := strconv.Atoi(getEnv("VALKEY_DB", "0"))
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid VALKEY_DB: %w", err)
+	}
+
+	telemetryHeaders, err := parseKeyValuePairs(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS"))
+	if err != nil {
+		return Config{}, fmt.Errorf("invalid OTEL_EXPORTER_OTLP_HEADERS: %w", err)
+	}
+	telemetryTimeout, err := getEnvDuration("OTEL_EXPORTER_OTLP_TIMEOUT", "10s")
+	if err != nil {
+		return Config{}, fmt.Errorf("invalid OTEL_EXPORTER_OTLP_TIMEOUT: %w", err)
+	}
+	metricInterval, err := getEnvDuration("OTEL_METRIC_EXPORT_INTERVAL", "15s")
+	if err != nil {
+		return Config{}, fmt.Errorf("invalid OTEL_METRIC_EXPORT_INTERVAL: %w", err)
 	}
 
 	dbSSLMode := getEnv("DB_SSLMODE", "")
@@ -156,6 +183,18 @@ func Load() (Config, error) {
 			Password: getEnv("VALKEY_PASSWORD", ""),
 			DB:       valkeyDB,
 			Prefix:   getEnv("VALKEY_PREFIX", "auth:refresh"),
+		},
+		Telemetry: TelemetryConfig{
+			OTLPEndpoint:         getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+			OTLPTracesEndpoint:   getEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", ""),
+			OTLPMetricsEndpoint:  getEnv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", ""),
+			OTLPProtocol:         strings.ToLower(getEnv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")),
+			OTLPHeaders:          telemetryHeaders,
+			OTLPInsecure:         getEnvBool("OTEL_EXPORTER_OTLP_INSECURE", false),
+			ExportTimeout:        telemetryTimeout,
+			MetricExportInterval: metricInterval,
+			ServiceName:          getEnv("OTEL_SERVICE_NAME", "auth-service"),
+			ServiceVersion:       getEnv("OTEL_SERVICE_VERSION", "dev"),
 		},
 	}
 
@@ -221,6 +260,15 @@ func getEnvBool(key string, fallback bool) bool {
 	return parsed
 }
 
+func getEnvDuration(key, fallback string) (time.Duration, error) {
+	value := getEnv(key, fallback)
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, err
+	}
+	return parsed, nil
+}
+
 func parseCSV(value string) []string {
 	parts := strings.Split(value, ",")
 	var results []string
@@ -231,6 +279,31 @@ func parseCSV(value string) []string {
 		}
 	}
 	return results
+}
+
+func parseKeyValuePairs(value string) (map[string]string, error) {
+	headers := make(map[string]string)
+	if strings.TrimSpace(value) == "" {
+		return headers, nil
+	}
+	parts := strings.Split(value, ",")
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		keyValue := strings.SplitN(trimmed, "=", 2)
+		if len(keyValue) != 2 {
+			return nil, fmt.Errorf("invalid key-value pair: %s", trimmed)
+		}
+		key := strings.TrimSpace(keyValue[0])
+		value := strings.TrimSpace(keyValue[1])
+		if key == "" || value == "" {
+			return nil, fmt.Errorf("invalid key-value pair: %s", trimmed)
+		}
+		headers[key] = value
+	}
+	return headers, nil
 }
 
 func parseSameSite(value string) (http.SameSite, error) {
