@@ -226,6 +226,7 @@ func writeCommand(writer *bufio.Writer, args ...string) error {
 	return nil
 }
 
+// test
 func readResponse(reader *bufio.Reader) (string, error) {
 	line, err := reader.ReadString('\n')
 	if err != nil {
