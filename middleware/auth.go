@@ -1,37 +1,52 @@
-// middleware/auth.go
 package middleware
 
 import (
-	"auth-service/utils"
+	"context"
 	"net/http"
 	"strings"
+
+	"auth-service/config"
+	"auth-service/utils"
 )
 
-func AuthMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			http.Error(w, "No token provided", http.StatusUnauthorized)
-			return
-		}
+type contextKey string
 
-		token := strings.TrimPrefix(authHeader, "Bearer ")
-		claims, isExpired, err := utils.ValidateToken(token)
-		if err != nil || isExpired {
-			http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
-			return
-		}
+const userClaimsKey contextKey = "userClaims"
 
-		// Add claims to context for downstream handlers
-		ctx := context.WithValue(r.Context(), "userClaims", claims)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+func AuthMiddleware(cfg config.Config) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			token := tokenFromRequest(r, cfg.Auth.AccessCookieName)
+			if token == "" {
+				http.Error(w, "No token provided", http.StatusUnauthorized)
+				return
+			}
+
+			claims, err := utils.ParseAccessToken(token, cfg.Auth.AccessTokenPublicKey)
+			if err != nil {
+				http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
+				return
+			}
+
+			ctx := context.WithValue(r.Context(), userClaimsKey, claims)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+func ClaimsFromContext(ctx context.Context) (*utils.Claims, bool) {
+	claims, ok := ctx.Value(userClaimsKey).(*utils.Claims)
+	return claims, ok
+}
+
+func ContextWithClaims(ctx context.Context, claims *utils.Claims) context.Context {
+	return context.WithValue(ctx, userClaimsKey, claims)
 }
 
 func RoleMiddleware(allowedRoles []string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			claims, ok := r.Context().Value("userClaims").(*utils.Claims)
+			claims, ok := ClaimsFromContext(r.Context())
 			if !ok || !contains(allowedRoles, claims.Role) {
 				http.Error(w, "Forbidden", http.StatusForbidden)
 				return
@@ -39,4 +54,26 @@ func RoleMiddleware(allowedRoles []string) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func tokenFromRequest(r *http.Request, cookieName string) string {
+	if cookie, err := r.Cookie(cookieName); err == nil && cookie.Value != "" {
+		return cookie.Value
+	}
+
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return ""
+	}
+
+	return strings.TrimPrefix(authHeader, "Bearer ")
+}
+
+func contains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
