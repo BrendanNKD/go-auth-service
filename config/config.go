@@ -280,7 +280,11 @@ func getEnvDuration(key, fallback string) (time.Duration, error) {
 	value := getEnv(key, fallback)
 	parsed, err := time.ParseDuration(value)
 	if err != nil {
-		return 0, err
+		parsedInt, intErr := strconv.Atoi(value)
+		if intErr != nil {
+			return 0, err
+		}
+		return time.Duration(parsedInt) * time.Millisecond, nil
 	}
 	return parsed, nil
 }
