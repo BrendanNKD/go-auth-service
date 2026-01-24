@@ -1,0 +1,81 @@
+name: Runtime - Health Check
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - feat/**
+      - fix/**
+      - breaking/**
+
+permissions:
+  contents: read
+
+jobs:
+  runtime_check:
+    runs-on: ubuntu-latest
+    env:
+      APP_PORT: ${{ secrets.APP_PORT }}
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USERNAME: ${{ secrets.DB_USERNAME }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      DB_INSTANCE_IDENTIFIER: ${{ secrets.DB_INSTANCE_IDENTIFIER }}
+      DB_ENGINE: ${{ secrets.DB_ENGINE }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+      DB_SSLMODE: ${{ secrets.DB_SSLMODE }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+      JWT_EXPIRE_HOURS: ${{ secrets.JWT_EXPIRE_HOURS }}
+      JWT_ACCESS_PRIVATE_KEY: ${{ secrets.JWT_ACCESS_PRIVATE_KEY }}
+      JWT_ACCESS_PUBLIC_KEY: ${{ secrets.JWT_ACCESS_PUBLIC_KEY }}
+      JWT_ACCESS_TTL: ${{ secrets.JWT_ACCESS_TTL }}
+      JWT_REFRESH_TTL: ${{ secrets.JWT_REFRESH_TTL }}
+      APP_ENV: ${{ secrets.APP_ENV }}
+      VALKEY_ADDR: ${{ secrets.VALKEY_ADDR }}
+      VALKEY_PASSWORD: ${{ secrets.VALKEY_PASSWORD }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Start Valkey (Redis compatible)
+        if: env.VALKEY_ADDR == ''
+        uses: supercharge/redis-github-action@1.8.0
+        with:
+          redis-version: "7"
+
+      - name: Build Backend Service
+        run: go build -o backend main.go
+
+      - name: Start Backend Service
+        if: env.DB_HOST != '' && env.APP_PORT != '' && env.DB_NAME != '' && env.DB_USERNAME != ''
+        run: |
+          PORT="${APP_PORT:-8080}"
+          echo "Starting the backend service on port ${PORT}..."
+          ./backend &
+          echo $! > backend.pid
+          sleep 5
+
+      - name: Health Check
+        if: env.DB_HOST != '' && env.APP_PORT != '' && env.DB_NAME != '' && env.DB_USERNAME != ''
+        run: |
+          PORT="${APP_PORT:-8080}"
+          echo "Checking service health..."
+          curl --fail "http://localhost:${PORT}/health"
+
+      - name: Stop Backend Service
+        if: always()
+        run: |
+          if [ -f backend.pid ]; then
+            kill "$(cat backend.pid)" || true
+          fi
+          rm -f backend.pid backend
