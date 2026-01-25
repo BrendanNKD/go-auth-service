@@ -8,6 +8,7 @@ on:
       - completed
 
 permissions:
+  actions: read
   contents: write
   id-token: write
 
@@ -20,12 +21,12 @@ jobs:
       contents: read
     env:
       AWS_REGION: ap-southeast-1
-      ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+      ECS_CLUSTER: ${{ secrets.ECS_CLUSTER || 'nusASSproject' }}
       ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
-      ECS_TASK_DEFINITION: ${{ secrets.ECS_TASK_DEFINITION }}
-      ECS_CONTAINER_NAME: ${{ secrets.ECS_CONTAINER_NAME }}
+      ECS_TASK_DEFINITION: ${{ secrets.ECS_TASK_DEFINITION || 'ecs-uat-jb-auth-service-td' }}
+      ECS_CONTAINER_NAME: ${{ secrets.ECS_CONTAINER_NAME || 'auth' }}
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-      ECS_ECR_REPOSITORY: ${{ secrets.ECS_ECR_REPOSITORY }}
+      ECS_ECR_REPOSITORY: ${{ secrets.ECS_ECR_REPOSITORY || 'uat/jobboard' }}
     steps:
       - name: Setup AWS Credentials Using OIDC
         uses: aws-actions/configure-aws-credentials@v4
@@ -35,6 +36,10 @@ jobs:
 
       - name: Verify ECR Repository Exists
         run: |
+          if [ -z "${{ env.ECS_ECR_REPOSITORY }}" ]; then
+            echo "::error::ECS_ECR_REPOSITORY is not set. Configure the secret or update the workflow default."
+            exit 1
+          fi
           if ! aws ecr describe-repositories --repository-names "${{ env.ECS_ECR_REPOSITORY }}" >/dev/null 2>&1; then
             echo "::error::ECR repository '${{ env.ECS_ECR_REPOSITORY }}' not found."
             echo "Create it via Terraform or IaC, then re-run the pipeline."
@@ -43,6 +48,10 @@ jobs:
 
       - name: Verify ECS Cluster Exists
         run: |
+          if [ -z "${{ env.ECS_CLUSTER }}" ]; then
+            echo "::error::ECS_CLUSTER is not set. Configure the secret or update the workflow default."
+            exit 1
+          fi
           status=$(aws ecs describe-clusters --clusters "${{ env.ECS_CLUSTER }}" --query 'clusters[0].status' --output text 2>/dev/null || true)
           if [ "$status" != "ACTIVE" ]; then
             echo "::error::ECS cluster '${{ env.ECS_CLUSTER }}' not found or inactive."
@@ -56,10 +65,10 @@ jobs:
     needs: preflight
     env:
       AWS_REGION: ap-southeast-1
-      ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+      ECS_CLUSTER: ${{ secrets.ECS_CLUSTER || 'nusASSproject' }}
       ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
-      ECS_TASK_DEFINITION: ${{ secrets.ECS_TASK_DEFINITION }}
-      ECS_CONTAINER_NAME: ${{ secrets.ECS_CONTAINER_NAME }}
+      ECS_TASK_DEFINITION: ${{ secrets.ECS_TASK_DEFINITION || 'ecs-uat-jb-auth-service-td' }}
+      ECS_CONTAINER_NAME: ${{ secrets.ECS_CONTAINER_NAME || 'auth' }}
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
       SERVICE_HEALTHCHECK_URL: ${{ secrets.SERVICE_HEALTHCHECK_URL }}
       ECS_BOOTSTRAP_STACK: ${{ secrets.ECS_BOOTSTRAP_STACK }}
@@ -68,7 +77,7 @@ jobs:
       ECS_SECURITY_GROUPS: ${{ secrets.ECS_SECURITY_GROUPS }}
       ECS_TASK_EXEC_ROLE_ARN: ${{ secrets.ECS_TASK_EXEC_ROLE_ARN }}
       ECS_TASK_ROLE_ARN: ${{ secrets.ECS_TASK_ROLE_ARN }}
-      ECS_ECR_REPOSITORY: ${{ secrets.ECS_ECR_REPOSITORY }}
+      ECS_ECR_REPOSITORY: ${{ secrets.ECS_ECR_REPOSITORY || 'uat/jobboard' }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
