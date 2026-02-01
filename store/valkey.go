@@ -169,7 +169,9 @@ func (v *ValkeyStore) IsRevoked(ctx context.Context, tokenHash string) (string, 
 }
 
 func (v *ValkeyStore) Close() error {
-	v.client.Close()
+	if v.client != nil {
+		v.client.Close()
+	}
 	return nil
 }
 
