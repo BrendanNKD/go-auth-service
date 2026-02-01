@@ -3,6 +3,7 @@ package middleware
 import (
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/felixge/httpsnoop"
@@ -11,6 +12,11 @@ import (
 
 func RequestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Header.Get("User-Agent"), "ELB-HealthChecker") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		start := time.Now()
 		metrics := httpsnoop.CaptureMetrics(next, w, r)
 		duration := metrics.Duration
