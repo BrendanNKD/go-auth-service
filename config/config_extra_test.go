@@ -70,18 +70,17 @@ func TestParseRSAPublicKeyErrors(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestLoadUsesInstanceIdentifierAndDefaultSSL(t *testing.T) {
+func TestLoadDefaultSSLMode(t *testing.T) {
 	privateKeyPEM, _ := testKeyPair(t)
 	t.Setenv("JWT_ACCESS_PRIVATE_KEY", privateKeyPEM)
 	t.Setenv("JWT_ACCESS_PUBLIC_KEY", "")
-	t.Setenv("DB_NAME", "")
-	t.Setenv("DB_INSTANCE_IDENTIFIER", "instance-id")
+	t.Setenv("DB_NAME", "testdb")
 	t.Setenv("DB_USERNAME", "user")
 	t.Setenv("APP_ENV", "dev")
 
 	cfg, err := Load()
 	assert.NoError(t, err)
-	assert.Equal(t, "instance-id", cfg.DB.Name)
+	assert.Equal(t, "testdb", cfg.DB.Name)
 	assert.Equal(t, "disable", cfg.DB.SSLMode)
 	assert.NotNil(t, cfg.Auth.AccessTokenPublicKey)
 }

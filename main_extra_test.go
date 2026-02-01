@@ -52,7 +52,7 @@ func TestValidatePostgresSecret(t *testing.T) {
 func TestLoadPostgresSecretValidationError(t *testing.T) {
 	originalGetSecret := getSecret
 	getSecret = func(name string) (string, error) {
-		return `{"username":"","password":"pass","engine":"postgres","host":"localhost","port":5432,"dbInstanceIdentifier":"db"}`, nil
+		return `{"username":"","password":"pass","engine":"postgres","host":"localhost","port":5432,"dbname":"testdb"}`, nil
 	}
 	defer func() { getSecret = originalGetSecret }()
 
@@ -69,7 +69,7 @@ func TestLoadProdSecretsValkeyOptional(t *testing.T) {
 		case "prod/jwt":
 			return `{"JWT_ACCESS_PRIVATE_KEY":"private","JWT_ACCESS_PUBLIC_KEY":"public","JWT_ACCESS_KID":"kid"}`, nil
 		case "prod/postgres":
-			return `{"username":"user","password":"pass","engine":"postgres","host":"localhost","port":5432,"dbInstanceIdentifier":"db"}`, nil
+			return `{"username":"user","password":"pass","engine":"postgres","host":"localhost","port":5432,"dbname":"testdb"}`, nil
 		case "prod/valkey":
 			return "", errors.New("missing")
 		default:
@@ -91,7 +91,7 @@ func TestLoadProdSecretsSetEnvFailures(t *testing.T) {
 		case "prod/jwt":
 			return `{"JWT_ACCESS_PRIVATE_KEY":"private","JWT_ACCESS_PUBLIC_KEY":"public","JWT_ACCESS_KID":"kid"}`, nil
 		case "prod/postgres":
-			return `{"username":"user","password":"pass","engine":"postgres","host":"localhost","port":5432,"dbInstanceIdentifier":"db"}`, nil
+			return `{"username":"user","password":"pass","engine":"postgres","host":"localhost","port":5432,"dbname":"testdb"}`, nil
 		case "prod/valkey":
 			return `{"VALKEY_ADDR":"localhost:6379"}`, nil
 		default:
@@ -110,7 +110,7 @@ func TestLoadProdSecretsSetEnvFailures(t *testing.T) {
 		"DB_ENGINE",
 		"DB_HOST",
 		"DB_PORT",
-		"DB_INSTANCE_IDENTIFIER",
+		"DB_NAME",
 		"VALKEY_ADDR",
 	}
 

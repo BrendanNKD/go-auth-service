@@ -196,7 +196,7 @@ func Load() (Config, error) {
 	}
 
 	if cfg.DB.Name == "" || cfg.DB.Username == "" {
-		return Config{}, errors.New("DB_NAME (or DB_INSTANCE_IDENTIFIER) and DB_USERNAME must be set")
+		return Config{}, errors.New("DB_NAME and DB_USERNAME must be set")
 	}
 
 	return cfg, nil
