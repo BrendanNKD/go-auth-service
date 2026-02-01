@@ -49,12 +49,12 @@ const (
 )
 
 type postgresSecret struct {
-	Username             string          `json:"username"`
-	Password             string          `json:"password"`
-	Engine               string          `json:"engine"`
-	Host                 string          `json:"host"`
-	Port                 json.Number     `json:"port"`
-	DBInstanceIdentifier string          `json:"dbInstanceIdentifier"`
+	Username string      `json:"username"`
+	Password string      `json:"password"`
+	Engine   string      `json:"engine"`
+	Host     string      `json:"host"`
+	Port     json.Number `json:"port"`
+	DBName   string      `json:"dbname"`
 }
 
 func loadSecretMap(secretName string) (map[string]string, error) {
@@ -132,7 +132,7 @@ func loadProdSecrets() error {
 	if err := setEnv("DB_PORT", pgValues.Port.String()); err != nil {
 		return err
 	}
-	if err := setEnv("DB_INSTANCE_IDENTIFIER", pgValues.DBInstanceIdentifier); err != nil {
+	if err := setEnv("DB_NAME", pgValues.DBName); err != nil {
 		return err
 	}
 

@@ -97,7 +97,6 @@ func TestLoadMissingDatabaseConfig(t *testing.T) {
 	t.Setenv("JWT_ACCESS_PRIVATE_KEY", privateKeyPEM)
 	t.Setenv("JWT_ACCESS_PUBLIC_KEY", publicKeyPEM)
 	t.Setenv("DB_NAME", "")
-	t.Setenv("DB_INSTANCE_IDENTIFIER", "")
 	t.Setenv("DB_USERNAME", "")
 	_, err := Load()
 	assert.Error(t, err)
