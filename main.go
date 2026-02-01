@@ -49,12 +49,12 @@ const (
 )
 
 type postgresSecret struct {
-	Username             string `json:"username"`
-	Password             string `json:"password"`
-	Engine               string `json:"engine"`
-	Host                 string `json:"host"`
-	Port                 int    `json:"port"`
-	DBInstanceIdentifier string `json:"dbInstanceIdentifier"`
+	Username             string          `json:"username"`
+	Password             string          `json:"password"`
+	Engine               string          `json:"engine"`
+	Host                 string          `json:"host"`
+	Port                 json.Number     `json:"port"`
+	DBInstanceIdentifier string          `json:"dbInstanceIdentifier"`
 }
 
 func loadSecretMap(secretName string) (map[string]string, error) {
@@ -97,8 +97,9 @@ func validatePostgresSecret(secret postgresSecret) error {
 	if secret.Username == "" || secret.Password == "" || secret.Engine == "" || secret.Host == "" || secret.DBInstanceIdentifier == "" {
 		return fmt.Errorf("postgres secret missing required fields")
 	}
-	if secret.Port <= 0 {
-		return fmt.Errorf("postgres secret has invalid port: %d", secret.Port)
+	port, err := secret.Port.Int64()
+	if err != nil || port <= 0 {
+		return fmt.Errorf("postgres secret has invalid port: %s", secret.Port)
 	}
 	return nil
 }
@@ -128,7 +129,7 @@ func loadProdSecrets() error {
 	if err := setEnv("DB_HOST", pgValues.Host); err != nil {
 		return err
 	}
-	if err := setEnv("DB_PORT", fmt.Sprintf("%d", pgValues.Port)); err != nil {
+	if err := setEnv("DB_PORT", pgValues.Port.String()); err != nil {
 		return err
 	}
 	if err := setEnv("DB_INSTANCE_IDENTIFIER", pgValues.DBInstanceIdentifier); err != nil {

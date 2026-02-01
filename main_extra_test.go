@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 )
@@ -31,7 +32,7 @@ func TestValidatePostgresSecret(t *testing.T) {
 		Engine:               "postgres",
 		Host:                 "host",
 		DBInstanceIdentifier: "db",
-		Port:                 0,
+		Port:                 json.Number("0"),
 	})
 	if err == nil {
 		t.Fatalf("expected error for invalid port")
@@ -43,7 +44,7 @@ func TestValidatePostgresSecret(t *testing.T) {
 		Engine:               "postgres",
 		Host:                 "host",
 		DBInstanceIdentifier: "db",
-		Port:                 5432,
+		Port:                 json.Number("5432"),
 	})
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
