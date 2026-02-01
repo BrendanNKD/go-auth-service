@@ -61,6 +61,7 @@ type ValkeyConfig struct {
 	Password string
 	DB       int
 	Prefix   string
+	UseTLS   bool
 }
 
 type TelemetryConfig struct {
@@ -180,6 +181,7 @@ func Load() (Config, error) {
 			Password: getEnv("VALKEY_PASSWORD", ""),
 			DB:       valkeyDB,
 			Prefix:   getEnv("VALKEY_PREFIX", "auth:refresh"),
+			UseTLS:   getEnvBool("VALKEY_USE_TLS", true),
 		},
 		Telemetry: TelemetryConfig{
 			OTLPEndpoint:         getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),

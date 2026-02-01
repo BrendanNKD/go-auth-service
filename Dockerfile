@@ -7,19 +7,19 @@ FROM golang:${GO_VERSION}-alpine AS builder
 
 WORKDIR /src
 
-RUN apk add --no-cache ca-certificates git
+RUN apk add --no-cache ca-certificates git gcc musl-dev
 
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -trimpath -ldflags="-s -w" -o /out/auth-service main.go
+RUN CGO_ENABLED=1 \
+    go build -tags musl -trimpath -ldflags="-s -w" -o /out/auth-service main.go
 
 FROM alpine:${ALPINE_VERSION} AS runtime
 
-RUN apk add --no-cache ca-certificates \
+RUN apk add --no-cache ca-certificates libgcc \
     && adduser -D -g '' appuser
 
 WORKDIR /app

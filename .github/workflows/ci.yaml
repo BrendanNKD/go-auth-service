@@ -32,6 +32,8 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,6 +43,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Install C toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc
 
       - name: Download Dependencies
         run: go mod download
@@ -52,6 +57,8 @@ jobs:
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -61,6 +68,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Install C toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc
 
       - name: Download Dependencies
         run: go mod download
