@@ -25,6 +25,8 @@ docker run --rm --name adot-collector \
 
 ```bash
 podman run --rm --name adot-collector \
+  --name adot-collector \
+  --network devnet \
   -p 4317:4317 \
   -p 4318:4318 \
   -v "$PWD/telemetry/adot-collector.yaml:/etc/otel-collector-config.yaml:ro" \

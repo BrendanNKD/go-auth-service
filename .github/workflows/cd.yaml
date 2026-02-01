@@ -1,0 +1,283 @@
+# ──────────────────────────────────────────────────────────────────────────────
+#  CD – Version ▸ Build & Push to ECR ▸ Deploy to ECS ▸ Post-Deploy
+# ──────────────────────────────────────────────────────────────────────────────
+name: CD
+
+on:
+  workflow_run:
+    workflows: [CI]
+    branches: [main]
+    types: [completed]
+
+permissions:
+  contents: write
+  id-token: write
+  security-events: write
+
+concurrency:
+  group: cd-production
+  cancel-in-progress: false          # never cancel an in-flight deploy
+
+# ──────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ── 1. Build, Version & Push ───────────────────────────────────────────────
+  build-push:
+    name: Build & Push to ECR
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      version: ${{ steps.version.outputs.version }}
+    env:
+      AWS_REGION: ap-southeast-1
+      ECR_REGISTRY: 927041702050.dkr.ecr.ap-southeast-1.amazonaws.com
+      ECR_REPOSITORY: nus/project/authservice
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Authenticate Docker with ECR
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} \
+            | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
+
+      - name: Determine Version
+        id: version
+        run: |
+          # Fetch existing tags from ECR
+          tags=$(aws ecr list-images \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --query 'imageIds[*].imageTag' --output text | tr '\t' '\n')
+
+          latest_version=$(echo "$tags" \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V | tail -n 1)
+
+          if [ -z "$latest_version" ]; then
+            latest_version="v1.0.0"
+          fi
+
+          IFS='.' read -r major minor patch <<< "${latest_version#v}"
+
+          # Determine bump type from merge commit message / branch name
+          commit_message=$(git log -1 --pretty=%B)
+          merge_source=$(echo "$commit_message" \
+            | sed -n 's/.*from .*\/\([^ ]*\).*/\1/p')
+
+          bump="patch"
+          if echo "$commit_message" | grep -Eiq 'breaking|BREAKING CHANGE' \
+             || echo "$merge_source" | grep -Eiq '^(breaking|major)/'; then
+            bump="major"
+          elif echo "$commit_message" | grep -Eiq 'feat' \
+               || echo "$merge_source" | grep -Eiq '^(feat|minor)/'; then
+            bump="minor"
+          elif echo "$merge_source" | grep -Eiq '^(fix|patch)/'; then
+            bump="patch"
+          fi
+
+          case "$bump" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            *)     patch=$((patch + 1)) ;;
+          esac
+
+          new_version="v$major.$minor.$patch"
+          echo "Bump: $bump → $new_version"
+          echo "version=$new_version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Image
+        run: |
+          docker build \
+            -t ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.version }} \
+            -t ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest \
+            .
+
+      # Gate: block push if image contains a CRITICAL vulnerability with a fix
+      - name: Trivy Image Scan (gate)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.version }}"
+          severity: CRITICAL
+          scanners: vuln
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Push to ECR
+        run: |
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.version }}
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+
+      - name: Export Image Metadata
+        id: meta
+        run: |
+          image="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.version }}"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+  # ── 2. Deploy to ECS ───────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to ECS
+    needs: build-push
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ap-southeast-1
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+      ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
+      ECS_TASK_DEFINITION: ${{ secrets.ECS_TASK_DEFINITION }}
+      ECS_CONTAINER_NAME: ${{ secrets.ECS_CONTAINER_NAME }}
+      ECS_ECR_REPOSITORY: ${{ secrets.ECS_ECR_REPOSITORY }}
+    steps:
+      - name: Setup AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Preflight – verify infrastructure exists
+      - name: Verify ECR Repository
+        run: |
+          aws ecr describe-repositories \
+            --repository-names "${{ env.ECS_ECR_REPOSITORY }}" >/dev/null 2>&1 \
+            || { echo "::error::ECR repository '${{ env.ECS_ECR_REPOSITORY }}' not found."; exit 1; }
+
+      - name: Verify ECS Cluster
+        run: |
+          status=$(aws ecs describe-clusters \
+            --clusters "${{ env.ECS_CLUSTER }}" \
+            --query 'clusters[0].status' --output text 2>/dev/null || true)
+          [ "$status" = "ACTIVE" ] \
+            || { echo "::error::ECS cluster '${{ env.ECS_CLUSTER }}' not active."; exit 1; }
+
+      # Rolling deploy
+      - name: Fetch Current Task Definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+            --query 'taskDefinition' > current-task-def.json
+
+      - name: Update Container Image
+        run: |
+          jq --arg IMG "${{ needs.build-push.outputs.image }}" \
+             --arg CTR "${{ env.ECS_CONTAINER_NAME }}" '
+            .containerDefinitions |= map(
+              if .name == $CTR then .image = $IMG else . end
+            ) |
+            del(.taskDefinitionArn, .revision, .status,
+                .requiresAttributes, .compatibilities,
+                .registeredAt, .registeredBy)
+          ' current-task-def.json > new-task-def.json
+
+      - name: Register New Task Definition
+        id: taskdef
+        run: |
+          arn=$(aws ecs register-task-definition \
+            --cli-input-json file://new-task-def.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "arn=$arn" >> "$GITHUB_OUTPUT"
+
+      - name: Update ECS Service
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --task-definition ${{ steps.taskdef.outputs.arn }} \
+            --force-new-deployment
+
+      - name: Wait for Service Stability
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }}
+
+      - name: Health Check
+        if: env.SERVICE_HEALTHCHECK_URL != ''
+        env:
+          SERVICE_HEALTHCHECK_URL: ${{ secrets.SERVICE_HEALTHCHECK_URL }}
+        run: |
+          echo "Checking service health at $SERVICE_HEALTHCHECK_URL"
+          for attempt in 1 2 3; do
+            if curl --fail --silent --max-time 10 "$SERVICE_HEALTHCHECK_URL"; then
+              echo ""
+              echo "Health check passed (attempt $attempt)"
+              exit 0
+            fi
+            echo "Attempt $attempt failed, retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Health check failed after 3 attempts"
+          exit 1
+
+  # ── 3. Post-Deploy – Update README ─────────────────────────────────────────
+  post-deploy:
+    name: Post-Deploy
+    needs: [build-push, deploy]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Update README with Release Info
+        if: github.actor != 'github-actions[bot]'
+        run: |
+          python3 - <<'PY'
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          readme = Path("README.md")
+          if not readme.exists():
+              readme.write_text(
+                  "# Go Auth Service\n\n"
+                  "## Release Information\n\n"
+                  "<!-- release-start -->\n<!-- release-end -->\n"
+              )
+
+          content = readme.read_text()
+          version = "${{ needs.build-push.outputs.version }}"
+          date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+          block = (
+              f"<!-- release-start -->\n"
+              f"- Latest version: {version}\n"
+              f"- Release date (UTC): {date}\n"
+              f"<!-- release-end -->"
+          )
+
+          if "<!-- release-start -->" in content and "<!-- release-end -->" in content:
+              before = content.split("<!-- release-start -->")[0]
+              after  = content.split("<!-- release-end -->")[-1]
+              updated = f"{before}{block}{after}"
+          else:
+              updated = f"{content.rstrip()}\n\n## Release Information\n\n{block}\n"
+
+          readme.write_text(updated)
+          PY
+
+      - name: Commit Release Info
+        if: github.actor != 'github-actions[bot]'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          if git diff --cached --quiet; then
+            echo "No README changes to commit."
+            exit 0
+          fi
+          git commit -m "docs: update release info [skip ci]"
+          git push

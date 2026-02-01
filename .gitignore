@@ -1,1 +1,30 @@
+# ── Secrets & environment ────────────────────────────────────────────────────
 .env
+.env.*
+*.pem
+*.key
+credentials.json
+
+# ── Terraform ────────────────────────────────────────────────────────────────
+infra/terraform/.terraform/
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.backup
+infra/terraform/*.tfvars
+!infra/terraform/terraform.tfvars.example
+infra/terraform/.terraform.lock.hcl
+infra/terraform/tfplan
+infra/terraform/crash.log
+
+# Terraform binary / archives (should not be committed)
+terraform
+terraform.zip
+
+# ── Go ───────────────────────────────────────────────────────────────────────
+coverage.out
+test-report.json
+
+# ── OS / IDE ─────────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp

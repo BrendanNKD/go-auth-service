@@ -1,9 +1,11 @@
-name: CI - Checks
+# ──────────────────────────────────────────────────────────────────────────────
+#  CI – Lint ▸ Test ▸ Security ▸ Build & Image Scan
+# ──────────────────────────────────────────────────────────────────────────────
+name: CI
 
 on:
   pull_request:
-    branches:
-      - main
+    branches: [main]
   push:
     branches:
       - main
@@ -11,36 +13,30 @@ on:
       - fix/**
       - minor/**
       - breaking/**
+      - major/**
+      - patch/**
 
 permissions:
   contents: read
   security-events: write
 
+# Cancel redundant runs on the same branch / PR
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# ──────────────────────────────────────────────────────────────────────────────
 jobs:
-  test_build_security:
+
+  # ── 1. Lint ─────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
-    env:
-      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-      APP_PORT: ${{ secrets.APP_PORT }}
-      DB_HOST: ${{ secrets.DB_HOST }}
-      DB_PORT: ${{ secrets.DB_PORT }}
-      DB_USERNAME: ${{ secrets.DB_USERNAME }}
-      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-      DB_INSTANCE_IDENTIFIER: ${{ secrets.DB_INSTANCE_IDENTIFIER }}
-      DB_ENGINE: ${{ secrets.DB_ENGINE }}
-      DB_NAME: ${{ secrets.DB_NAME }}
-      DB_SSLMODE: ${{ secrets.DB_SSLMODE }}
-      JWT_SECRET: ${{ secrets.JWT_SECRET }}
-      JWT_EXPIRE_HOURS: ${{ secrets.JWT_EXPIRE_HOURS }}
-      APP_ENV: ${{ secrets.APP_ENV }}
-
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Set up Go
+      - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -49,56 +45,103 @@ jobs:
       - name: Download Dependencies
         run: go mod download
 
-      - name: Run Go Vet
+      - name: Go Vet
         run: go vet ./...
 
-      - name: Run Unit Tests
-        run: |
-          go test ./... -json -coverprofile=coverage.out > test-report.json
+  # ── 2. Unit Tests ──────────────────────────────────────────────────────────
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Upload Unit Test Artifacts
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download Dependencies
+        run: go mod download
+
+      - name: Run Tests
+        run: |
+          go test ./... -race -count=1 \
+            -coverprofile=coverage.out \
+            -covermode=atomic \
+            -json > test-report.json 2>&1 || true
+          # Verify tests actually passed (go test -json exits 0 even on failure when piped)
+          go test ./... -race -count=1 -coverprofile=/dev/null
+
+      - name: Upload Test Artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: go-test-report
+          name: test-results
           path: |
             test-report.json
             coverage.out
 
-      - name: Run Gitleaks Secret Scanning
+  # ── 3. Secret Scan (Gitleaks) ──────────────────────────────────────────────
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── 4. Dependency & Config Scan (Trivy + Snyk) ─────────────────────────────
+  sca-scan:
+    name: SCA & Misconfig Scan
+    runs-on: ubuntu-latest
+    env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Trivy filesystem scan – table output for log readability
+      - name: Trivy Filesystem Scan
+        uses: aquasecurity/trivy-action@0.28.0
         with:
-          args: --report-format sarif --report-path gitleaks.sarif
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          scanners: vuln,secret,misconfig
+          ignore-unfixed: true
+          exit-code: "0"
+          format: table
 
-      - name: Upload Gitleaks Report
-        uses: actions/upload-artifact@v4
+      # Trivy filesystem scan – SARIF for GitHub Security tab
+      - name: Trivy Filesystem SARIF Report
+        uses: aquasecurity/trivy-action@0.28.0
         with:
-          name: gitleaks-report
-          path: gitleaks.sarif
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          scanners: vuln,secret,misconfig
+          ignore-unfixed: true
+          exit-code: "0"
+          format: sarif
+          output: trivy-fs.sarif
 
-      # - name: Run Trivy Repository Scan
-      #   uses: aquasecurity/trivy-action@0.20.0
-      #   with:
-      #     scan-type: fs
-      #     scan-ref: .
-      #     severity: HIGH,CRITICAL
-      #     scanners: vuln,secret,config
-      #     ignore-unfixed: true
-      #     exit-code: "1"
-      #     format: sarif
-      #     output: trivy-fs.sarif
+      - name: Upload Trivy SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-filesystem
 
-      # - name: Upload Trivy Repository Report
-      #   uses: actions/upload-artifact@v4
-      #   with:
-      #     name: trivy-fs-report
-      #     path: trivy-fs.sarif
-
-      - name: Build Docker Image
-        run: docker build -t authservice:ci .
-
-      - name: Run Snyk to check for vulnerabilities
+      # Snyk – conditional on token availability
+      - name: Snyk Vulnerability Scan
         if: env.SNYK_TOKEN != ''
         uses: snyk/actions/golang@master
         continue-on-error: true
@@ -107,15 +150,71 @@ jobs:
         with:
           args: --sarif-file-output=snyk.sarif
 
-      - name: Upload Snyk results to GitHub Code Scanning
+      - name: Upload Snyk SARIF to GitHub Security
         if: env.SNYK_TOKEN != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk.sarif
+          category: snyk
 
-      - name: Upload Snyk Report
-        if: env.SNYK_TOKEN != ''
+      - name: Upload Security Reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: snyk-report
-          path: snyk.sarif
+          name: security-reports
+          path: |
+            trivy-fs.sarif
+            snyk.sarif
+          if-no-files-found: ignore
+
+  # ── 5. Build Docker Image & Image Scan ─────────────────────────────────────
+  build:
+    name: Build & Image Scan
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: authservice:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Trivy image scan – table output for logs
+      - name: Trivy Image Scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: authservice:ci
+          severity: CRITICAL,HIGH
+          scanners: vuln
+          ignore-unfixed: true
+          exit-code: "0"
+          format: table
+
+      # Trivy image scan – SARIF for GitHub Security tab
+      - name: Trivy Image SARIF Report
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: authservice:ci
+          severity: CRITICAL,HIGH
+          scanners: vuln
+          ignore-unfixed: true
+          exit-code: "0"
+          format: sarif
+          output: trivy-image.sarif
+
+      - name: Upload Trivy Image SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
