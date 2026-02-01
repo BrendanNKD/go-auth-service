@@ -123,6 +123,7 @@ func Init(ctx context.Context, cfg config.Config) (func(context.Context) error, 
 
 	otel.SetTracerProvider(traceProvider)
 	otel.SetMeterProvider(metricProvider)
+	log.Printf("Successfully connected to ADOT collector (protocol=%s)", cfg.Telemetry.OTLPProtocol)
 
 	return func(shutdownCtx context.Context) error {
 		shutdownCtx, cancel := context.WithTimeout(shutdownCtx, 5*time.Second)

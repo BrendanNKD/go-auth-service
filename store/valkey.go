@@ -1,16 +1,17 @@
 package store
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
-	"strconv"
-	"strings"
 	"time"
 
-	"auth-service/config"
+	appconfig "auth-service/config"
+
+	glide "github.com/valkey-io/valkey-glide/go/v2"
+	"github.com/valkey-io/valkey-glide/go/v2/config"
+	"github.com/valkey-io/valkey-glide/go/v2/models"
+	"github.com/valkey-io/valkey-glide/go/v2/options"
 )
 
 type RefreshTokenStore interface {
@@ -26,19 +27,16 @@ type RefreshTokenStore interface {
 }
 
 var (
-	dialContext    = (&net.Dialer{}).DialContext
-	newBufioReader = bufio.NewReader
-	newBufioWriter = bufio.NewWriter
-	jsonMarshal    = json.Marshal
-	jsonUnmarshal  = json.Unmarshal
+	jsonMarshal   = json.Marshal
+	jsonUnmarshal = json.Unmarshal
 )
 
-type ValkeyStore struct {
-	addr     string
-	password string
-	db       int
-	prefix   string
-	timeout  time.Duration
+// valkeyClient defines the subset of the GLIDE client used by ValkeyStore.
+type valkeyClient interface {
+	SetWithOptions(ctx context.Context, key string, value string, opts options.SetOptions) (models.Result[string], error)
+	Get(ctx context.Context, key string) (models.Result[string], error)
+	Del(ctx context.Context, keys []string) (int64, error)
+	Close()
 }
 
 type RefreshTokenMetadata struct {
@@ -55,102 +53,123 @@ type RefreshSession struct {
 	IssuedAt         time.Time `json:"issued_at"`
 }
 
-func NewValkeyStore(cfg config.ValkeyConfig) (*ValkeyStore, error) {
-	store := &ValkeyStore{
-		addr:     cfg.Addr,
-		password: cfg.Password,
-		db:       cfg.DB,
-		prefix:   cfg.Prefix,
-		timeout:  5 * time.Second,
+type ValkeyStore struct {
+	client valkeyClient
+	prefix string
+}
+
+// newGlideClient creates a real GLIDE client. Replaced in tests.
+var newGlideClient = func(cfg appconfig.ValkeyConfig) (valkeyClient, error) {
+	glideConfig := config.NewClientConfiguration().
+		WithAddress(&config.NodeAddress{Host: hostFromAddr(cfg.Addr), Port: portFromAddr(cfg.Addr)}).
+		WithDatabaseId(cfg.DB)
+
+	if cfg.Password != "" {
+		glideConfig.WithCredentials(config.NewServerCredentialsWithDefaultUsername(cfg.Password))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := store.do(ctx, "PING"); err != nil {
-		return nil, fmt.Errorf("valkey ping failed: %w", err)
+	if cfg.UseTLS {
+		glideConfig.WithUseTLS(true)
 	}
 
-	return store, nil
+	client, err := glide.NewClient(glideConfig)
+	if err != nil {
+		return nil, fmt.Errorf("valkey glide connect failed: %w", err)
+	}
+	return client, nil
+}
+
+func NewValkeyStore(cfg appconfig.ValkeyConfig) (*ValkeyStore, error) {
+	client, err := newGlideClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ValkeyStore{
+		client: client,
+		prefix: cfg.Prefix,
+	}, nil
 }
 
 func (v *ValkeyStore) SaveToken(ctx context.Context, tokenHash string, metadata RefreshTokenMetadata, ttl time.Duration) error {
-	seconds := strconv.FormatInt(int64(ttl.Seconds()), 10)
 	payload, err := jsonMarshal(metadata)
 	if err != nil {
 		return err
 	}
-	_, err = v.do(ctx, "SET", v.tokenKey(tokenHash), string(payload), "EX", seconds)
+	opts := *options.NewSetOptions().SetExpiry(options.NewExpiryIn(ttl))
+	_, err = v.client.SetWithOptions(ctx, v.tokenKey(tokenHash), string(payload), opts)
 	return err
 }
 
 func (v *ValkeyStore) GetToken(ctx context.Context, tokenHash string) (RefreshTokenMetadata, bool, error) {
-	response, err := v.do(ctx, "GET", v.tokenKey(tokenHash))
+	result, err := v.client.Get(ctx, v.tokenKey(tokenHash))
 	if err != nil {
 		return RefreshTokenMetadata{}, false, err
 	}
-	if response == "" {
+	if result.IsNil() {
 		return RefreshTokenMetadata{}, false, nil
 	}
 	var metadata RefreshTokenMetadata
-	if err := jsonUnmarshal([]byte(response), &metadata); err != nil {
+	if err := jsonUnmarshal([]byte(result.Value()), &metadata); err != nil {
 		return RefreshTokenMetadata{}, false, err
 	}
 	return metadata, true, nil
 }
 
 func (v *ValkeyStore) RevokeToken(ctx context.Context, tokenHash string) error {
-	_, err := v.do(ctx, "DEL", v.tokenKey(tokenHash))
+	_, err := v.client.Del(ctx, []string{v.tokenKey(tokenHash)})
 	return err
 }
 
 func (v *ValkeyStore) SaveSession(ctx context.Context, sessionID string, session RefreshSession, ttl time.Duration) error {
-	seconds := strconv.FormatInt(int64(ttl.Seconds()), 10)
 	payload, err := jsonMarshal(session)
 	if err != nil {
 		return err
 	}
-	_, err = v.do(ctx, "SET", v.sessionKey(sessionID), string(payload), "EX", seconds)
+	opts := *options.NewSetOptions().SetExpiry(options.NewExpiryIn(ttl))
+	_, err = v.client.SetWithOptions(ctx, v.sessionKey(sessionID), string(payload), opts)
 	return err
 }
 
 func (v *ValkeyStore) GetSession(ctx context.Context, sessionID string) (RefreshSession, bool, error) {
-	response, err := v.do(ctx, "GET", v.sessionKey(sessionID))
+	result, err := v.client.Get(ctx, v.sessionKey(sessionID))
 	if err != nil {
 		return RefreshSession{}, false, err
 	}
-	if response == "" {
+	if result.IsNil() {
 		return RefreshSession{}, false, nil
 	}
 	var session RefreshSession
-	if err := jsonUnmarshal([]byte(response), &session); err != nil {
+	if err := jsonUnmarshal([]byte(result.Value()), &session); err != nil {
 		return RefreshSession{}, false, err
 	}
 	return session, true, nil
 }
 
 func (v *ValkeyStore) RevokeSession(ctx context.Context, sessionID string) error {
-	_, err := v.do(ctx, "DEL", v.sessionKey(sessionID))
+	_, err := v.client.Del(ctx, []string{v.sessionKey(sessionID)})
 	return err
 }
 
 func (v *ValkeyStore) MarkRevoked(ctx context.Context, tokenHash, sessionID string, ttl time.Duration) error {
-	seconds := strconv.FormatInt(int64(ttl.Seconds()), 10)
-	_, err := v.do(ctx, "SET", v.revokedKey(tokenHash), sessionID, "EX", seconds)
+	opts := *options.NewSetOptions().SetExpiry(options.NewExpiryIn(ttl))
+	_, err := v.client.SetWithOptions(ctx, v.revokedKey(tokenHash), sessionID, opts)
 	return err
 }
 
 func (v *ValkeyStore) IsRevoked(ctx context.Context, tokenHash string) (string, bool, error) {
-	response, err := v.do(ctx, "GET", v.revokedKey(tokenHash))
+	result, err := v.client.Get(ctx, v.revokedKey(tokenHash))
 	if err != nil {
 		return "", false, err
 	}
-	if response == "" {
+	if result.IsNil() {
 		return "", false, nil
 	}
-	return response, true, nil
+	return result.Value(), true, nil
 }
 
 func (v *ValkeyStore) Close() error {
+	v.client.Close()
 	return nil
 }
 
@@ -166,98 +185,24 @@ func (v *ValkeyStore) revokedKey(tokenHash string) string {
 	return fmt.Sprintf("%s:revoked:%s", v.prefix, tokenHash)
 }
 
-func (v *ValkeyStore) do(ctx context.Context, args ...string) (string, error) {
-	conn, err := dialContext(ctx, "tcp", v.addr)
-	if err != nil {
-		return "", err
-	}
-	defer conn.Close()
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	} else {
-		_ = conn.SetDeadline(time.Now().Add(v.timeout))
-	}
-
-	reader := newBufioReader(conn)
-	writer := newBufioWriter(conn)
-
-	if v.password != "" {
-		if err := writeCommand(writer, "AUTH", v.password); err != nil {
-			return "", err
-		}
-		if err := writer.Flush(); err != nil {
-			return "", err
-		}
-		if _, err := readResponse(reader); err != nil {
-			return "", err
+func hostFromAddr(addr string) string {
+	for i := len(addr) - 1; i >= 0; i-- {
+		if addr[i] == ':' {
+			return addr[:i]
 		}
 	}
-
-	if v.db > 0 {
-		if err := writeCommand(writer, "SELECT", strconv.Itoa(v.db)); err != nil {
-			return "", err
-		}
-		if err := writer.Flush(); err != nil {
-			return "", err
-		}
-		if _, err := readResponse(reader); err != nil {
-			return "", err
-		}
-	}
-
-	if err := writeCommand(writer, args...); err != nil {
-		return "", err
-	}
-	if err := writer.Flush(); err != nil {
-		return "", err
-	}
-	return readResponse(reader)
+	return addr
 }
 
-func writeCommand(writer *bufio.Writer, args ...string) error {
-	if _, err := writer.WriteString(fmt.Sprintf("*%d\r\n", len(args))); err != nil {
-		return err
-	}
-	for _, arg := range args {
-		if _, err := writer.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(arg), arg)); err != nil {
-			return err
+func portFromAddr(addr string) int {
+	for i := len(addr) - 1; i >= 0; i-- {
+		if addr[i] == ':' {
+			port := 0
+			for _, c := range addr[i+1:] {
+				port = port*10 + int(c-'0')
+			}
+			return port
 		}
 	}
-	return nil
-}
-
-// test
-func readResponse(reader *bufio.Reader) (string, error) {
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		return "", err
-	}
-	line = strings.TrimSuffix(line, "\r\n")
-	if line == "" {
-		return "", fmt.Errorf("empty response")
-	}
-
-	switch line[0] {
-	case '+':
-		return line[1:], nil
-	case '-':
-		return "", fmt.Errorf("valkey error: %s", line[1:])
-	case ':':
-		return line[1:], nil
-	case '$':
-		length, err := strconv.Atoi(line[1:])
-		if err != nil {
-			return "", fmt.Errorf("invalid bulk length: %w", err)
-		}
-		if length == -1 {
-			return "", nil
-		}
-		buffer := make([]byte, length+2)
-		if _, err := reader.Read(buffer); err != nil {
-			return "", err
-		}
-		return strings.TrimSuffix(string(buffer), "\r\n"), nil
-	default:
-		return "", fmt.Errorf("unexpected response: %s", line)
-	}
+	return 6379
 }

@@ -211,6 +211,7 @@ func run() error {
 		return fmt.Errorf("valkey connection error: %w", err)
 	}
 	defer valkeyStore.Close()
+	log.Println("Successfully connected to Valkey")
 
 	authHandler := handlers.NewAuthHandler(cfg, valkeyStore)
 	router := setupRoutes(cfg, authHandler)
