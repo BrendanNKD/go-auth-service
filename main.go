@@ -94,7 +94,7 @@ func loadPostgresSecret() (postgresSecret, error) {
 }
 
 func validatePostgresSecret(secret postgresSecret) error {
-	if secret.Username == "" || secret.Password == "" || secret.Engine == "" || secret.Host == "" || secret.DBInstanceIdentifier == "" {
+	if secret.Username == "" || secret.Password == "" || secret.Engine == "" || secret.Host == "" {
 		return fmt.Errorf("postgres secret missing required fields")
 	}
 	port, err := secret.Port.Int64()
