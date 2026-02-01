@@ -81,9 +81,6 @@ func Load() (Config, error) {
 	port := getEnv("APP_PORT", "8080")
 
 	dbName := getEnv("DB_NAME", "")
-	if dbName == "" {
-		dbName = os.Getenv("DB_INSTANCE_IDENTIFIER")
-	}
 
 	accessPrivateKeyPEM := normalizePEMEnv(os.Getenv("JWT_ACCESS_PRIVATE_KEY"))
 	accessPublicKeyPEM := normalizePEMEnv(os.Getenv("JWT_ACCESS_PUBLIC_KEY"))

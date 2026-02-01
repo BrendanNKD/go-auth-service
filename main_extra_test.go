@@ -27,24 +27,22 @@ func TestValidatePostgresSecret(t *testing.T) {
 	}
 
 	err = validatePostgresSecret(postgresSecret{
-		Username:             "user",
-		Password:             "pass",
-		Engine:               "postgres",
-		Host:                 "host",
-		DBInstanceIdentifier: "db",
-		Port:                 json.Number("0"),
+		Username: "user",
+		Password: "pass",
+		Engine:   "postgres",
+		Host:     "host",
+		Port:     json.Number("0"),
 	})
 	if err == nil {
 		t.Fatalf("expected error for invalid port")
 	}
 
 	err = validatePostgresSecret(postgresSecret{
-		Username:             "user",
-		Password:             "pass",
-		Engine:               "postgres",
-		Host:                 "host",
-		DBInstanceIdentifier: "db",
-		Port:                 json.Number("5432"),
+		Username: "user",
+		Password: "pass",
+		Engine:   "postgres",
+		Host:     "host",
+		Port:     json.Number("5432"),
 	})
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
