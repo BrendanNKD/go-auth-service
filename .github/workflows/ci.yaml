@@ -4,6 +4,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   pull_request:
     branches: [main]
   push:
@@ -17,7 +18,9 @@ on:
       - patch/**
 
 permissions:
+  actions: read
   contents: read
+  pull-requests: read
   security-events: write
 
 # Cancel redundant runs on the same branch / PR
@@ -28,10 +31,47 @@ concurrency:
 # ──────────────────────────────────────────────────────────────────────────────
 jobs:
 
+  pipeline-map:
+    name: Pipeline Map
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish Pipeline Map
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## CI Pipeline Map
+
+          ```mermaid
+          flowchart LR
+            trigger["Commit / PR"] --> map["Pipeline Map"]
+            map --> lint["Lint"]
+            map --> test["Unit Tests + HTML Report"]
+            map --> secret["Secret Scan"]
+            map --> codeql["CodeQL SAST"]
+            map --> govuln["Go Vulnerability Scan"]
+            map --> deps["Dependency Review"]
+            map --> owasp["OWASP Dependency-Check"]
+            map --> zap["OWASP ZAP Baseline"]
+            map --> sca["SCA & Misconfig Scan"]
+            map --> report["CI HTML Report"]
+            lint --> build["Build & Image Scan"]
+            test --> build
+            secret --> report
+            codeql --> report
+            govuln --> report
+            deps --> report
+            owasp --> report
+            zap --> report
+            sca --> report
+            build --> report
+            report --> summary["CI Summary"]
+          ```
+          EOF
+
   # ── 1. Lint ─────────────────────────────────────────────────────────────────
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    needs: pipeline-map
     env:
       CGO_ENABLED: "1"
     steps:
@@ -55,8 +95,9 @@ jobs:
 
   # ── 2. Unit Tests ──────────────────────────────────────────────────────────
   test:
-    name: Unit Tests
+    name: Unit Tests + HTML Report
     runs-on: ubuntu-latest
+    needs: pipeline-map
     env:
       CGO_ENABLED: "1"
     steps:
@@ -80,23 +121,41 @@ jobs:
           go test ./... -race -count=1 \
             -coverprofile=coverage.out \
             -covermode=atomic \
-            -json > test-report.json 2>&1 || true
-          # Verify tests actually passed (go test -json exits 0 even on failure when piped)
-          go test ./... -race -count=1 -coverprofile=/dev/null
+            -json > test-report.json 2>&1
+
+      - name: Generate HTML Test Report
+        if: always()
+        run: |
+          mkdir -p reports
+          if [ -s coverage.out ]; then
+            go tool cover -html=coverage.out -o reports/coverage.html || echo "coverage.html unavailable" > reports/coverage-error.txt
+            go tool cover -func=coverage.out > reports/coverage.txt || echo "coverage.txt unavailable" > reports/coverage.txt
+          else
+            echo "coverage.out was not produced." > reports/coverage.txt
+          fi
+          python3 .github/scripts/render-test-report.py \
+            --json test-report.json \
+            --coverage coverage.out \
+            --html reports/test-report.html \
+            --summary reports/test-summary.md
+          cat reports/test-summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Test Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
+          name: unit-test-report
           path: |
+            reports/
             test-report.json
             coverage.out
+          if-no-files-found: warn
 
   # ── 3. Secret Scan (Gitleaks) ──────────────────────────────────────────────
   secret-scan:
     name: Secret Scan
     runs-on: ubuntu-latest
+    needs: pipeline-map
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -108,10 +167,337 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── 4. Dependency & Config Scan (Trivy + Snyk) ─────────────────────────────
+  # -- 4. Security Scans ------------------------------------------------------
+  codeql:
+    name: CodeQL SAST
+    runs-on: ubuntu-latest
+    needs: pipeline-map
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: go
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Analyze
+        id: analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:go
+          output: codeql-results
+
+      - name: Upload CodeQL SARIF
+        if: always() && steps.analyze.outputs.sarif-output != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-sarif
+          path: ${{ steps.analyze.outputs.sarif-output }}
+          if-no-files-found: ignore
+
+  go-vuln-scan:
+    name: Go Vulnerability Scan
+    runs-on: ubuntu-latest
+    needs: pipeline-map
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install C toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
+      - name: Download Dependencies
+        run: go mod download
+
+      - name: Install Govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Govulncheck SARIF Report
+        continue-on-error: true
+        run: |
+          "$(go env GOPATH)/bin/govulncheck" -format sarif ./... > govulncheck.sarif
+
+      - name: Normalize Govulncheck SARIF
+        if: always() && hashFiles('govulncheck.sarif') != ''
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("govulncheck.sarif")
+          data = json.loads(path.read_text(encoding="utf-8"))
+
+          for run in data.get("runs", []):
+              rules = run.get("tool", {}).get("driver", {}).get("rules", [])
+              for rule in rules:
+                  props = rule.get("properties")
+                  if not isinstance(props, dict):
+                      continue
+                  tags = props.get("tags")
+                  if not isinstance(tags, list):
+                      continue
+                  seen = set()
+                  props["tags"] = [
+                      tag for tag in tags
+                      if not (tag in seen or seen.add(tag))
+                  ]
+
+          path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload Govulncheck SARIF
+        if: always() && hashFiles('govulncheck.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: govulncheck.sarif
+          category: govulncheck
+
+      - name: Upload Govulncheck Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: govulncheck-report
+          path: govulncheck.sarif
+          if-no-files-found: ignore
+
+      - name: Govulncheck Gate
+        run: |
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    needs: pipeline-map
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Review Dependency Changes
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          retry-on-snapshot-warnings: true
+          retry-on-snapshot-warnings-timeout: 600
+          show-patched-versions: true
+
+  owasp-dependency-check:
+    name: OWASP Dependency-Check
+    if: vars.RUN_OWASP_DEPENDENCY_CHECK == 'true'
+    runs-on: ubuntu-latest
+    needs: pipeline-map
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set OWASP Dependency-Check Cache Key
+        id: owasp-cache
+        run: echo "week=$(date +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache OWASP Dependency-Check Data
+        uses: actions/cache@v4
+        with:
+          path: .owasp-dependency-check-data
+          key: owasp-dependency-check-${{ runner.os }}-${{ steps.owasp-cache.outputs.week }}
+          restore-keys: |
+            owasp-dependency-check-${{ runner.os }}-
+
+      - name: Run OWASP Dependency-Check
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          mkdir -p owasp-dependency-check-report .owasp-dependency-check-data
+          if [ -z "$NVD_API_KEY" ]; then
+            echo "::warning::NVD_API_KEY is not set; OWASP Dependency-Check can be much slower without it."
+          fi
+
+          args=(
+            --project "go-auth-service"
+            --scan /src/go.mod
+            --scan /src/go.sum
+            --out /report
+            --format ALL
+            --failOnCVSS 9
+            --enableExperimental
+            --prettyPrint
+            --exclude /src/.git
+            --exclude /src/.gocache
+            --exclude /src/.owasp-dependency-check-data
+            --exclude /src/owasp-dependency-check-report
+          )
+
+          if [ -n "$NVD_API_KEY" ]; then
+            args+=(--nvdApiKey "$NVD_API_KEY")
+          fi
+
+          docker run --rm \
+            -v "$PWD:/src" \
+            -v "$PWD/owasp-dependency-check-report:/report" \
+            -v "$PWD/.owasp-dependency-check-data:/usr/share/dependency-check/data" \
+            owasp/dependency-check:12.2.0 \
+            "${args[@]}"
+
+      - name: Upload OWASP Dependency-Check SARIF
+        if: always() && hashFiles('owasp-dependency-check-report/dependency-check-report.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: owasp-dependency-check-report/dependency-check-report.sarif
+          category: owasp-dependency-check
+
+      - name: Upload OWASP Dependency-Check Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owasp-dependency-check-report
+          path: owasp-dependency-check-report/
+          if-no-files-found: warn
+
+  owasp-zap-baseline:
+    name: OWASP ZAP Baseline
+    runs-on: ubuntu-latest
+    needs: pipeline-map
+    env:
+      APP_ENV: dev
+      APP_PORT: "8080"
+      DB_ENGINE: postgres
+      DB_HOST: 127.0.0.1
+      DB_PORT: "5432"
+      DB_NAME: auth_service
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      DB_SSLMODE: disable
+      VALKEY_ADDR: 127.0.0.1:6379
+      VALKEY_PASSWORD: ""
+      VALKEY_DB: "0"
+      VALKEY_PREFIX: auth:refresh
+      VALKEY_USE_TLS: "false"
+      COOKIE_DOMAIN: ""
+      COOKIE_SECURE: "false"
+      COOKIE_SAMESITE: lax
+      CORS_ALLOWED_ORIGINS: http://127.0.0.1:8080
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
+      ZAP_TARGET_URL: http://127.0.0.1:8080/api/v1/health
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: auth_service
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d auth_service"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      valkey:
+        image: valkey/valkey:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Runtime Tools
+        run: sudo apt-get update && sudo apt-get install -y gcc postgresql-client openssl curl
+
+      - name: Download Dependencies
+        run: go mod download
+
+      - name: Prepare ZAP Database
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -U postgres -d auth_service -f db/schema.sql
+          psql -h 127.0.0.1 -U postgres -d auth_service \
+            -c "INSERT INTO roles (name, description) VALUES ('user', 'Default user') ON CONFLICT (name) DO NOTHING;"
+
+      - name: Start App for ZAP
+        run: |
+          export JWT_ACCESS_PRIVATE_KEY
+          JWT_ACCESS_PRIVATE_KEY="$(openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 2>/dev/null)"
+
+          go run . > zap-app.log 2>&1 &
+          echo "$!" > zap-app.pid
+
+          for attempt in {1..60}; do
+            if curl -fsS "$ZAP_TARGET_URL"; then
+              exit 0
+            fi
+            sleep 2
+          done
+
+          cat zap-app.log
+          exit 1
+
+      - name: Run OWASP ZAP Baseline Scan
+        id: zap
+        continue-on-error: true
+        run: |
+          mkdir -p owasp-zap-baseline-report
+          docker run --rm --network host \
+            -v "$PWD/owasp-zap-baseline-report:/zap/wrk:rw" \
+            zaproxy/zap-stable:stable \
+            zap-baseline.py \
+              -t "$ZAP_TARGET_URL" \
+              -r zap-report.html \
+              -J zap-report.json \
+              -w zap-report.md \
+              -a \
+              -I
+
+      - name: Upload OWASP ZAP Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owasp-zap-baseline-report
+          path: owasp-zap-baseline-report/
+          if-no-files-found: warn
+
+      - name: Stop ZAP App
+        if: always()
+        run: |
+          if [ -f zap-app.pid ]; then
+            kill "$(cat zap-app.pid)" || true
+          fi
+          if [ -f zap-app.log ]; then
+            cat zap-app.log
+          fi
+
+      - name: OWASP ZAP Gate
+        if: always() && steps.zap.outcome == 'failure'
+        run: |
+          echo "::warning::OWASP ZAP baseline reported findings. Review the owasp-zap-baseline-report artifact."
+
   sca-scan:
     name: SCA & Misconfig Scan
     runs-on: ubuntu-latest
+    needs: pipeline-map
     env:
       SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
     steps:
@@ -120,7 +506,7 @@ jobs:
 
       # Trivy filesystem scan – table output for log readability
       - name: Trivy Filesystem Scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type: fs
           scan-ref: .
@@ -132,7 +518,7 @@ jobs:
 
       # Trivy filesystem scan – SARIF for GitHub Security tab
       - name: Trivy Filesystem SARIF Report
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type: fs
           scan-ref: .
@@ -150,15 +536,23 @@ jobs:
           sarif_file: trivy-fs.sarif
           category: trivy-filesystem
 
+      - name: Generate Trivy SBOM
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: cyclonedx
+          output: sbom.cdx.json
+
       # Snyk – conditional on token availability
       - name: Snyk Vulnerability Scan
         if: env.SNYK_TOKEN != ''
-        uses: snyk/actions/golang@master
+        uses: snyk/actions/golang@v1.0.0
         continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
-          args: --sarif-file-output=snyk.sarif
+          args: --severity-threshold=high --sarif-file-output=snyk.sarif
 
       - name: Upload Snyk SARIF to GitHub Security
         if: env.SNYK_TOKEN != ''
@@ -175,13 +569,27 @@ jobs:
           path: |
             trivy-fs.sarif
             snyk.sarif
+            sbom.cdx.json
           if-no-files-found: ignore
 
-  # ── 5. Build Docker Image & Image Scan ─────────────────────────────────────
+      - name: Trivy Filesystem Critical Gate
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL
+          scanners: vuln,misconfig
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+  # -- 5. Build Docker Image & Image Scan -------------------------------------
   build:
     name: Build & Image Scan
     runs-on: ubuntu-latest
     needs: [lint, test]
+    env:
+      GO_VERSION: "1.26.2"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -196,12 +604,23 @@ jobs:
           push: false
           load: true
           tags: authservice:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          build-args: |
+            GO_VERSION=${{ env.GO_VERSION }}
+          cache-from: type=gha,scope=authservice-go-${{ env.GO_VERSION }}
+          cache-to: type=gha,mode=max,scope=authservice-go-${{ env.GO_VERSION }}
+
+      - name: Verify Image Go Toolchain
+        run: |
+          container_id="$(docker create authservice:ci)"
+          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+          docker cp "$container_id:/app/auth-service" auth-service-image
+          docker run --rm -v "$PWD:/work" -w /work "golang:${GO_VERSION}-alpine" \
+            go version -m auth-service-image | tee image-go-version.txt
+          grep -q "go${GO_VERSION}" image-go-version.txt
 
       # Trivy image scan – table output for logs
       - name: Trivy Image Scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: authservice:ci
           severity: CRITICAL,HIGH
@@ -212,7 +631,7 @@ jobs:
 
       # Trivy image scan – SARIF for GitHub Security tab
       - name: Trivy Image SARIF Report
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: authservice:ci
           severity: CRITICAL,HIGH
@@ -224,7 +643,293 @@ jobs:
 
       - name: Upload Trivy Image SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        if: always() && hashFiles('trivy-image.sarif') != ''
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
+
+      - name: Generate Trivy Image SBOM
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          image-ref: authservice:ci
+          format: cyclonedx
+          output: image-sbom.cdx.json
+
+      - name: Upload Image Security Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-security-reports
+          path: |
+            trivy-image.sarif
+            image-sbom.cdx.json
+          if-no-files-found: ignore
+
+      - name: Trivy Image Critical Gate
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          image-ref: authservice:ci
+          severity: CRITICAL
+          scanners: vuln
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+  security-report:
+    name: CI HTML Report
+    runs-on: ubuntu-latest
+    needs: [secret-scan, codeql, go-vuln-scan, dependency-review, owasp-dependency-check, owasp-zap-baseline, sca-scan, build]
+    if: always()
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare Report Workspace
+        run: mkdir -p security-artifacts ci-html-report ci-html-report/security
+
+      - name: Download Unit Test Report
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: unit-test-report
+          path: ci-html-report/tests
+
+      - name: Download CodeQL SARIF
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: codeql-sarif
+          path: security-artifacts/codeql
+
+      - name: Download Govulncheck Report
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: govulncheck-report
+          path: security-artifacts/govulncheck
+
+      - name: Download OWASP Dependency-Check Report
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: owasp-dependency-check-report
+          path: security-artifacts/owasp-dependency-check
+
+      - name: Download OWASP ZAP Report
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: owasp-zap-baseline-report
+          path: security-artifacts/owasp-zap
+
+      - name: Download Security Reports
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: security-reports
+          path: security-artifacts/sca
+
+      - name: Download Image Security Reports
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: image-security-reports
+          path: security-artifacts/image
+
+      - name: Generate CI HTML Report
+        run: |
+          python3 .github/scripts/render-security-report.py \
+            --input security-artifacts \
+            --html ci-html-report/security-report.html \
+            --summary ci-html-report/security-summary.md \
+            --index ci-html-report/index.html \
+            --title "All Security Scans" \
+            --test-report-link tests/reports/test-report.html \
+            --coverage-report-link tests/reports/coverage.html
+
+          mkdir -p security-artifacts/trivy-filesystem security-artifacts/snyk security-artifacts/trivy-image
+          if [ -f security-artifacts/sca/trivy-fs.sarif ]; then
+            cp security-artifacts/sca/trivy-fs.sarif security-artifacts/trivy-filesystem/
+          fi
+          if [ -f security-artifacts/sca/snyk.sarif ]; then
+            cp security-artifacts/sca/snyk.sarif security-artifacts/snyk/
+          fi
+          if [ -f security-artifacts/image/trivy-image.sarif ]; then
+            cp security-artifacts/image/trivy-image.sarif security-artifacts/trivy-image/
+          fi
+
+          python3 .github/scripts/render-security-report.py \
+            --input security-artifacts/codeql \
+            --html ci-html-report/security/codeql.html \
+            --summary ci-html-report/security/codeql-summary.md \
+            --title "CodeQL SAST Report"
+
+          python3 .github/scripts/render-security-report.py \
+            --input security-artifacts/govulncheck \
+            --html ci-html-report/security/govulncheck.html \
+            --summary ci-html-report/security/govulncheck-summary.md \
+            --title "Go Vulnerability Report"
+
+          python3 .github/scripts/render-security-report.py \
+            --input security-artifacts/dependency-review \
+            --html ci-html-report/security/dependency-review.html \
+            --summary ci-html-report/security/dependency-review-summary.md \
+            --title "Dependency Review Report"
+
+          python3 .github/scripts/render-security-report.py \
+            --input security-artifacts/sca \
+            --html ci-html-report/security/dependency-sca.html \
+            --summary ci-html-report/security/dependency-sca-summary.md \
+            --title "Trivy and Snyk Dependency Report"
+
+          python3 .github/scripts/render-security-report.py \
+            --input security-artifacts/trivy-filesystem \
+            --html ci-html-report/security/trivy-filesystem.html \
+            --summary ci-html-report/security/trivy-filesystem-summary.md \
+            --title "Trivy Filesystem Report"
+
+          python3 .github/scripts/render-security-report.py \
+            --input security-artifacts/snyk \
+            --html ci-html-report/security/snyk.html \
+            --summary ci-html-report/security/snyk-summary.md \
+            --title "Snyk Vulnerability Report"
+
+          python3 .github/scripts/render-security-report.py \
+            --input security-artifacts/image \
+            --html ci-html-report/security/container-image.html \
+            --summary ci-html-report/security/container-image-summary.md \
+            --title "Container Image Security Report"
+
+          python3 .github/scripts/render-security-report.py \
+            --input security-artifacts/trivy-image \
+            --html ci-html-report/security/trivy-image.html \
+            --summary ci-html-report/security/trivy-image-summary.md \
+            --title "Trivy Image Report"
+
+          python3 .github/scripts/render-security-report.py \
+            --input security-artifacts/owasp-dependency-check \
+            --html ci-html-report/security/owasp-dependency-check.html \
+            --summary ci-html-report/security/owasp-dependency-check-summary.md \
+            --title "OWASP Dependency-Check Report"
+
+          python3 .github/scripts/render-security-report.py \
+            --input security-artifacts/owasp-zap \
+            --html ci-html-report/security/owasp-zap.html \
+            --summary ci-html-report/security/owasp-zap-summary.md \
+            --title "OWASP ZAP Baseline Report"
+
+          if [ -f security-artifacts/owasp-zap/zap-report.html ]; then
+            cp security-artifacts/owasp-zap/zap-report.html ci-html-report/security/owasp-zap-raw.html
+          else
+            cp ci-html-report/security/owasp-zap.html ci-html-report/security/owasp-zap-raw.html
+          fi
+
+          cat > ci-html-report/security/index.html <<'EOF'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Security Report Library</title>
+            <style>
+              :root { --bg: #f5f7fb; --panel: #ffffff; --ink: #101820; --muted: #60707f; --line: #dce3ea; --accent: #1f8f5f; --shadow: 0 18px 42px rgba(16, 24, 32, 0.10); }
+              * { box-sizing: border-box; }
+              body { margin: 0; color: var(--ink); background: linear-gradient(135deg, #f5f7fb 0%, #edf7f2 50%, #f9eef1 100%); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.5; }
+              main { width: min(1040px, calc(100% - 32px)); margin: 0 auto; padding: 44px 0 56px; }
+              header, a { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); }
+              header { padding: 28px; }
+              h1 { margin: 0; font-size: 32px; letter-spacing: 0; }
+              p { margin: 6px 0 0; color: var(--muted); }
+              nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 18px; }
+              a { display: block; min-height: 118px; padding: 18px; color: var(--ink); text-decoration: none; }
+              a strong { display: block; font-size: 18px; }
+              a span { display: block; margin-top: 6px; color: var(--muted); }
+              a:focus, a:hover { border-color: var(--accent); }
+              @media (max-width: 860px) { nav { grid-template-columns: 1fr; } }
+            </style>
+          </head>
+          <body>
+            <main>
+              <header>
+                <h1>Security Report Library</h1>
+                <p>Scanner-specific HTML reports from this CI run.</p>
+              </header>
+              <nav aria-label="Security reports">
+                <a href="../security-report.html"><strong>All Security Scans</strong><span>Combined SARIF findings from every downloaded scanner artifact.</span></a>
+                <a href="codeql.html"><strong>CodeQL SAST</strong><span>Code scanning findings from GitHub CodeQL.</span></a>
+                <a href="govulncheck.html"><strong>Go Vulnerabilities</strong><span>Reachable Go vulnerabilities found by govulncheck.</span></a>
+                <a href="dependency-review.html"><strong>Dependency Review</strong><span>PR dependency delta review status from GitHub.</span></a>
+                <a href="dependency-sca.html"><strong>Trivy and Snyk</strong><span>Filesystem dependencies, misconfigurations, secrets, and Snyk findings.</span></a>
+                <a href="trivy-filesystem.html"><strong>Trivy Filesystem</strong><span>Trivy findings from repository files and configuration.</span></a>
+                <a href="snyk.html"><strong>Snyk</strong><span>Snyk dependency vulnerability findings when a token is configured.</span></a>
+                <a href="container-image.html"><strong>Container Image</strong><span>Trivy image scan findings and image SBOM artifacts.</span></a>
+                <a href="trivy-image.html"><strong>Trivy Image</strong><span>Container image vulnerabilities from Trivy SARIF.</span></a>
+                <a href="owasp-zap.html"><strong>OWASP ZAP Baseline</strong><span>Dynamic baseline scan against the CI-started auth service.</span></a>
+                <a href="owasp-zap-raw.html"><strong>Raw ZAP HTML</strong><span>Original ZAP report when the scanner produced one.</span></a>
+                <a href="owasp-dependency-check.html"><strong>OWASP Dependency-Check</strong><span>Currently skipped because it is too slow for this CI path.</span></a>
+              </nav>
+            </main>
+          </body>
+          </html>
+          EOF
+          cat ci-html-report/security-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload CI HTML Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-html-report
+          path: ci-html-report/
+          if-no-files-found: error
+
+  ci-summary:
+    name: CI Summary
+    runs-on: ubuntu-latest
+    needs: [lint, test, secret-scan, codeql, go-vuln-scan, dependency-review, owasp-dependency-check, owasp-zap-baseline, sca-scan, build, security-report]
+    if: always()
+    steps:
+      - name: Publish CI Summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Pipeline Result
+
+          | Stage | Result |
+          | --- | --- |
+          | Lint | `${{ needs.lint.result }}` |
+          | Unit Tests + HTML Report | `${{ needs.test.result }}` |
+          | Secret Scan | `${{ needs['secret-scan'].result }}` |
+          | CodeQL SAST | `${{ needs.codeql.result }}` |
+          | Go Vulnerability Scan | `${{ needs['go-vuln-scan'].result }}` |
+          | Dependency Review | `${{ needs['dependency-review'].result }}` |
+          | OWASP Dependency-Check | `${{ needs['owasp-dependency-check'].result }}` |
+          | OWASP ZAP Baseline | `${{ needs['owasp-zap-baseline'].result }}` |
+          | SCA & Misconfig Scan | `${{ needs['sca-scan'].result }}` |
+          | Build & Image Scan | `${{ needs.build.result }}` |
+          | CI HTML Report | `${{ needs['security-report'].result }}` |
+
+          ```mermaid
+          flowchart LR
+            lint["Lint: ${{ needs.lint.result }}"]
+            test["Unit Tests + HTML Report: ${{ needs.test.result }}"]
+            secret["Secret Scan: ${{ needs['secret-scan'].result }}"]
+            codeql["CodeQL SAST: ${{ needs.codeql.result }}"]
+            govuln["Go Vulnerability Scan: ${{ needs['go-vuln-scan'].result }}"]
+            deps["Dependency Review: ${{ needs['dependency-review'].result }}"]
+            owasp["OWASP Dependency-Check: ${{ needs['owasp-dependency-check'].result }}"]
+            zap["OWASP ZAP Baseline: ${{ needs['owasp-zap-baseline'].result }}"]
+            sca["SCA & Misconfig Scan: ${{ needs['sca-scan'].result }}"]
+            build["Build & Image Scan: ${{ needs.build.result }}"]
+            report["CI HTML Report: ${{ needs['security-report'].result }}"]
+            done["CI Summary"]
+            lint --> build
+            test --> build
+            secret --> report
+            codeql --> report
+            govuln --> report
+            deps --> report
+            owasp --> report
+            zap --> report
+            sca --> report
+            build --> report
+            report --> done
+          ```
+          EOF

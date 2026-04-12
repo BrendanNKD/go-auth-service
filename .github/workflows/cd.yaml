@@ -34,6 +34,7 @@ jobs:
       ECR_REGISTRY: 927041702050.dkr.ecr.ap-southeast-1.amazonaws.com
       ECR_REPOSITORY: nus/project/authservice
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      GO_VERSION: "1.26.2"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -101,13 +102,14 @@ jobs:
       - name: Build Docker Image
         run: |
           docker build \
+            --build-arg GO_VERSION="${GO_VERSION}" \
             -t ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.version }} \
             -t ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest \
             .
 
       # Gate: block push if image contains a CRITICAL vulnerability with a fix
       - name: Trivy Image Scan (gate)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.version }}"
           severity: CRITICAL
