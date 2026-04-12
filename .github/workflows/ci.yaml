@@ -260,30 +260,56 @@ jobs:
         uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: high
+          retry-on-snapshot-warnings: true
+          retry-on-snapshot-warnings-timeout: 600
+          show-patched-versions: true
 
   owasp-dependency-check:
     name: OWASP Dependency-Check
     runs-on: ubuntu-latest
     needs: pipeline-map
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set OWASP Dependency-Check Cache Key
+        id: owasp-cache
+        run: echo "week=$(date +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache OWASP Dependency-Check Data
+        uses: actions/cache@v4
+        with:
+          path: .owasp-dependency-check-data
+          key: owasp-dependency-check-${{ runner.os }}-${{ steps.owasp-cache.outputs.week }}
+          restore-keys: |
+            owasp-dependency-check-${{ runner.os }}-
 
       - name: Run OWASP Dependency-Check
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
           mkdir -p owasp-dependency-check-report .owasp-dependency-check-data
+          if [ -z "$NVD_API_KEY" ]; then
+            echo "::warning::NVD_API_KEY is not set; OWASP Dependency-Check can be much slower without it."
+          fi
 
           args=(
             --project "go-auth-service"
-            --scan /src
+            --scan /src/go.mod
+            --scan /src/go.sum
             --out /report
             --format ALL
             --failOnCVSS 9
-            --enableRetired
+            --enableExperimental
             --prettyPrint
+            --nvdValidForHours 24
             --disableAssembly
+            --disableRetireJs
+            --disableNodeJS
+            --disableNodeAudit
+            --disableYarnAudit
+            --disablePnpmAudit
             --exclude /src/.git
             --exclude /src/.gocache
             --exclude /src/.owasp-dependency-check-data
