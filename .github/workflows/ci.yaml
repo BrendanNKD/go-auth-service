@@ -368,16 +368,129 @@ jobs:
     name: OWASP ZAP Baseline
     runs-on: ubuntu-latest
     needs: pipeline-map
-    if: vars.OWASP_ZAP_TARGET_URL != ''
+    env:
+      APP_ENV: dev
+      APP_PORT: "8080"
+      DB_ENGINE: postgres
+      DB_HOST: 127.0.0.1
+      DB_PORT: "5432"
+      DB_NAME: auth_service
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      DB_SSLMODE: disable
+      VALKEY_ADDR: 127.0.0.1:6379
+      VALKEY_PASSWORD: ""
+      VALKEY_DB: "0"
+      VALKEY_PREFIX: auth:refresh
+      VALKEY_USE_TLS: "false"
+      COOKIE_DOMAIN: ""
+      COOKIE_SECURE: "false"
+      COOKIE_SAMESITE: lax
+      CORS_ALLOWED_ORIGINS: http://127.0.0.1:8080
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
+      ZAP_TARGET_URL: http://127.0.0.1:8080/api/v1/health
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: auth_service
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d auth_service"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      valkey:
+        image: valkey/valkey:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
-      - name: Run OWASP ZAP Baseline Scan
-        uses: zaproxy/action-baseline@v0.15.0
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          target: ${{ vars.OWASP_ZAP_TARGET_URL }}
-          fail_action: true
-          allow_issue_writing: false
-          artifact_name: owasp-zap-baseline-report
-          cmd_options: -a
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Runtime Tools
+        run: sudo apt-get update && sudo apt-get install -y gcc postgresql-client openssl curl
+
+      - name: Download Dependencies
+        run: go mod download
+
+      - name: Prepare ZAP Database
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -U postgres -d auth_service -f db/schema.sql
+          psql -h 127.0.0.1 -U postgres -d auth_service \
+            -c "INSERT INTO roles (name, description) VALUES ('user', 'Default user') ON CONFLICT (name) DO NOTHING;"
+
+      - name: Start App for ZAP
+        run: |
+          export JWT_ACCESS_PRIVATE_KEY
+          JWT_ACCESS_PRIVATE_KEY="$(openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 2>/dev/null)"
+
+          go run . > zap-app.log 2>&1 &
+          echo "$!" > zap-app.pid
+
+          for attempt in {1..60}; do
+            if curl -fsS "$ZAP_TARGET_URL"; then
+              exit 0
+            fi
+            sleep 2
+          done
+
+          cat zap-app.log
+          exit 1
+
+      - name: Run OWASP ZAP Baseline Scan
+        id: zap
+        continue-on-error: true
+        run: |
+          mkdir -p owasp-zap-baseline-report
+          docker run --rm --network host \
+            -v "$PWD/owasp-zap-baseline-report:/zap/wrk:rw" \
+            zaproxy/zap-stable:stable \
+            zap-baseline.py \
+              -t "$ZAP_TARGET_URL" \
+              -r zap-report.html \
+              -J zap-report.json \
+              -w zap-report.md \
+              -a \
+              -I
+
+      - name: Upload OWASP ZAP Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owasp-zap-baseline-report
+          path: owasp-zap-baseline-report/
+          if-no-files-found: warn
+
+      - name: Stop ZAP App
+        if: always()
+        run: |
+          if [ -f zap-app.pid ]; then
+            kill "$(cat zap-app.pid)" || true
+          fi
+          if [ -f zap-app.log ]; then
+            cat zap-app.log
+          fi
+
+      - name: OWASP ZAP Gate
+        if: always() && steps.zap.outcome == 'failure'
+        run: exit 1
 
   sca-scan:
     name: SCA & Misconfig Scan
