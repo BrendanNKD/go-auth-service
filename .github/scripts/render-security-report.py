@@ -194,7 +194,7 @@ def render_source_rows(sarif_files: list[Path], input_dir: Path) -> str:
     return "\n".join(f"<tr><td>{esc(path.relative_to(root))}</td></tr>" for path in sarif_files)
 
 
-def render_html(findings: list[dict[str, Any]], sarif_files: list[Path], input_dir: Path, output_path: Path) -> None:
+def render_html(findings: list[dict[str, Any]], sarif_files: list[Path], input_dir: Path, output_path: Path, title: str) -> None:
     counts = severity_counts(findings)
     generated_at = dt.datetime.now(dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     total = len(findings)
@@ -206,7 +206,7 @@ def render_html(findings: list[dict[str, Any]], sarif_files: list[Path], input_d
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Go Auth Service Security Report</title>
+  <title>{esc(title)}</title>
   <style>
     :root {{
       --bg: #f5f7fb;
@@ -291,7 +291,7 @@ def render_html(findings: list[dict[str, Any]], sarif_files: list[Path], input_d
   <main>
     <header>
       <div>
-        <h1>Go Auth Service Security Report</h1>
+        <h1>{esc(title)}</h1>
         <p>{esc(generated_at)}</p>
       </div>
       <span class="pill {top_class}">{esc(top_status)}</span>
@@ -446,12 +446,13 @@ def main() -> int:
     parser.add_argument("--html", required=True, type=Path, help="Output HTML report path")
     parser.add_argument("--summary", required=True, type=Path, help="Output GitHub summary Markdown path")
     parser.add_argument("--index", type=Path, help="Optional combined CI report index path")
+    parser.add_argument("--title", default="Go Auth Service Security Report", help="HTML report title")
     parser.add_argument("--test-report-link", default="tests/reports/test-report.html", help="Relative link to the test HTML report")
     parser.add_argument("--coverage-report-link", default="tests/reports/coverage.html", help="Relative link to the coverage HTML report")
     args = parser.parse_args()
 
     findings, sarif_files = collect_findings(args.input)
-    render_html(findings, sarif_files, args.input, args.html)
+    render_html(findings, sarif_files, args.input, args.html, args.title)
     render_summary(findings, sarif_files, args.summary)
     if args.index:
         security_link = args.html.name if args.html.parent == args.index.parent else args.html.as_posix()
