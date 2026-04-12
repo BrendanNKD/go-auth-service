@@ -303,7 +303,6 @@ jobs:
             --failOnCVSS 9
             --enableExperimental
             --prettyPrint
-            --nvdValidForHours 24
             --exclude /src/.git
             --exclude /src/.gocache
             --exclude /src/.owasp-dependency-check-data
