@@ -225,7 +225,8 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
 
       - name: Govulncheck SARIF Report
-        run: "$(go env GOPATH)/bin/govulncheck" -format sarif ./... > govulncheck.sarif
+        run: |
+          "$(go env GOPATH)/bin/govulncheck" -format sarif ./... > govulncheck.sarif
 
       - name: Upload Govulncheck SARIF
         if: always() && hashFiles('govulncheck.sarif') != ''
@@ -243,7 +244,8 @@ jobs:
           if-no-files-found: ignore
 
       - name: Govulncheck Gate
-        run: "$(go env GOPATH)/bin/govulncheck" ./...
+        run: |
+          "$(go env GOPATH)/bin/govulncheck" ./...
 
   dependency-review:
     name: Dependency Review
