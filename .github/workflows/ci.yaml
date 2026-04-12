@@ -225,8 +225,37 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
 
       - name: Govulncheck SARIF Report
+        continue-on-error: true
         run: |
           "$(go env GOPATH)/bin/govulncheck" -format sarif ./... > govulncheck.sarif
+
+      - name: Normalize Govulncheck SARIF
+        if: always() && hashFiles('govulncheck.sarif') != ''
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("govulncheck.sarif")
+          data = json.loads(path.read_text(encoding="utf-8"))
+
+          for run in data.get("runs", []):
+              rules = run.get("tool", {}).get("driver", {}).get("rules", [])
+              for rule in rules:
+                  props = rule.get("properties")
+                  if not isinstance(props, dict):
+                      continue
+                  tags = props.get("tags")
+                  if not isinstance(tags, list):
+                      continue
+                  seen = set()
+                  props["tags"] = [
+                      tag for tag in tags
+                      if not (tag in seen or seen.add(tag))
+                  ]
+
+          path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+          PY
 
       - name: Upload Govulncheck SARIF
         if: always() && hashFiles('govulncheck.sarif') != ''
@@ -486,7 +515,7 @@ jobs:
 
       - name: Upload Trivy Image SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        if: always() && hashFiles('trivy-image.sarif') != ''
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
