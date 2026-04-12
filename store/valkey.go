@@ -7,11 +7,6 @@ import (
 	"time"
 
 	appconfig "auth-service/config"
-
-	glide "github.com/valkey-io/valkey-glide/go/v2"
-	"github.com/valkey-io/valkey-glide/go/v2/config"
-	"github.com/valkey-io/valkey-glide/go/v2/models"
-	"github.com/valkey-io/valkey-glide/go/v2/options"
 )
 
 type RefreshTokenStore interface {
@@ -31,12 +26,12 @@ var (
 	jsonUnmarshal = json.Unmarshal
 )
 
-// valkeyClient defines the subset of the GLIDE client used by ValkeyStore.
+// valkeyClient defines the Valkey commands used by ValkeyStore.
 type valkeyClient interface {
-	SetWithOptions(ctx context.Context, key string, value string, opts options.SetOptions) (models.Result[string], error)
-	Get(ctx context.Context, key string) (models.Result[string], error)
-	Del(ctx context.Context, keys []string) (int64, error)
-	Close()
+	Set(ctx context.Context, key string, value string, ttl time.Duration) error
+	Get(ctx context.Context, key string) (string, bool, error)
+	Del(ctx context.Context, keys []string) error
+	Close() error
 }
 
 type RefreshTokenMetadata struct {
@@ -58,29 +53,11 @@ type ValkeyStore struct {
 	prefix string
 }
 
-// newGlideClient creates a real GLIDE client. Replaced in tests.
-var newGlideClient = func(cfg appconfig.ValkeyConfig) (valkeyClient, error) {
-	glideConfig := config.NewClientConfiguration().
-		WithAddress(&config.NodeAddress{Host: hostFromAddr(cfg.Addr), Port: portFromAddr(cfg.Addr)}).
-		WithDatabaseId(cfg.DB)
-
-	if cfg.Password != "" {
-		glideConfig.WithCredentials(config.NewServerCredentialsWithDefaultUsername(cfg.Password))
-	}
-
-	if cfg.UseTLS {
-		glideConfig.WithUseTLS(true)
-	}
-
-	client, err := glide.NewClient(glideConfig)
-	if err != nil {
-		return nil, fmt.Errorf("valkey glide connect failed: %w", err)
-	}
-	return client, nil
-}
+// newValkeyClient creates a real Valkey client. Replaced in tests.
+var newValkeyClient = createValkeyClient
 
 func NewValkeyStore(cfg appconfig.ValkeyConfig) (*ValkeyStore, error) {
-	client, err := newGlideClient(cfg)
+	client, err := newValkeyClient(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -96,29 +73,26 @@ func (v *ValkeyStore) SaveToken(ctx context.Context, tokenHash string, metadata 
 	if err != nil {
 		return err
 	}
-	opts := *options.NewSetOptions().SetExpiry(options.NewExpiryIn(ttl))
-	_, err = v.client.SetWithOptions(ctx, v.tokenKey(tokenHash), string(payload), opts)
-	return err
+	return v.client.Set(ctx, v.tokenKey(tokenHash), string(payload), ttl)
 }
 
 func (v *ValkeyStore) GetToken(ctx context.Context, tokenHash string) (RefreshTokenMetadata, bool, error) {
-	result, err := v.client.Get(ctx, v.tokenKey(tokenHash))
+	value, found, err := v.client.Get(ctx, v.tokenKey(tokenHash))
 	if err != nil {
 		return RefreshTokenMetadata{}, false, err
 	}
-	if result.IsNil() {
+	if !found {
 		return RefreshTokenMetadata{}, false, nil
 	}
 	var metadata RefreshTokenMetadata
-	if err := jsonUnmarshal([]byte(result.Value()), &metadata); err != nil {
+	if err := jsonUnmarshal([]byte(value), &metadata); err != nil {
 		return RefreshTokenMetadata{}, false, err
 	}
 	return metadata, true, nil
 }
 
 func (v *ValkeyStore) RevokeToken(ctx context.Context, tokenHash string) error {
-	_, err := v.client.Del(ctx, []string{v.tokenKey(tokenHash)})
-	return err
+	return v.client.Del(ctx, []string{v.tokenKey(tokenHash)})
 }
 
 func (v *ValkeyStore) SaveSession(ctx context.Context, sessionID string, session RefreshSession, ttl time.Duration) error {
@@ -126,51 +100,46 @@ func (v *ValkeyStore) SaveSession(ctx context.Context, sessionID string, session
 	if err != nil {
 		return err
 	}
-	opts := *options.NewSetOptions().SetExpiry(options.NewExpiryIn(ttl))
-	_, err = v.client.SetWithOptions(ctx, v.sessionKey(sessionID), string(payload), opts)
-	return err
+	return v.client.Set(ctx, v.sessionKey(sessionID), string(payload), ttl)
 }
 
 func (v *ValkeyStore) GetSession(ctx context.Context, sessionID string) (RefreshSession, bool, error) {
-	result, err := v.client.Get(ctx, v.sessionKey(sessionID))
+	value, found, err := v.client.Get(ctx, v.sessionKey(sessionID))
 	if err != nil {
 		return RefreshSession{}, false, err
 	}
-	if result.IsNil() {
+	if !found {
 		return RefreshSession{}, false, nil
 	}
 	var session RefreshSession
-	if err := jsonUnmarshal([]byte(result.Value()), &session); err != nil {
+	if err := jsonUnmarshal([]byte(value), &session); err != nil {
 		return RefreshSession{}, false, err
 	}
 	return session, true, nil
 }
 
 func (v *ValkeyStore) RevokeSession(ctx context.Context, sessionID string) error {
-	_, err := v.client.Del(ctx, []string{v.sessionKey(sessionID)})
-	return err
+	return v.client.Del(ctx, []string{v.sessionKey(sessionID)})
 }
 
 func (v *ValkeyStore) MarkRevoked(ctx context.Context, tokenHash, sessionID string, ttl time.Duration) error {
-	opts := *options.NewSetOptions().SetExpiry(options.NewExpiryIn(ttl))
-	_, err := v.client.SetWithOptions(ctx, v.revokedKey(tokenHash), sessionID, opts)
-	return err
+	return v.client.Set(ctx, v.revokedKey(tokenHash), sessionID, ttl)
 }
 
 func (v *ValkeyStore) IsRevoked(ctx context.Context, tokenHash string) (string, bool, error) {
-	result, err := v.client.Get(ctx, v.revokedKey(tokenHash))
+	value, found, err := v.client.Get(ctx, v.revokedKey(tokenHash))
 	if err != nil {
 		return "", false, err
 	}
-	if result.IsNil() {
+	if !found {
 		return "", false, nil
 	}
-	return result.Value(), true, nil
+	return value, true, nil
 }
 
 func (v *ValkeyStore) Close() error {
 	if v.client != nil {
-		v.client.Close()
+		return v.client.Close()
 	}
 	return nil
 }

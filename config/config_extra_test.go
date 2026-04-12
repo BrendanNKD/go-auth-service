@@ -85,6 +85,31 @@ func TestLoadDefaultSSLMode(t *testing.T) {
 	assert.NotNil(t, cfg.Auth.AccessTokenPublicKey)
 }
 
+func TestLoadDefaultValkeyTLSFollowsEnvironment(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("APP_ENV", "dev")
+	t.Setenv("VALKEY_USE_TLS", "")
+
+	cfg, err := Load()
+	assert.NoError(t, err)
+	assert.False(t, cfg.Valkey.UseTLS)
+
+	t.Setenv("APP_ENV", "prod")
+	cfg, err = Load()
+	assert.NoError(t, err)
+	assert.True(t, cfg.Valkey.UseTLS)
+}
+
+func TestLoadValkeyTLSOverride(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("APP_ENV", "dev")
+	t.Setenv("VALKEY_USE_TLS", "true")
+
+	cfg, err := Load()
+	assert.NoError(t, err)
+	assert.True(t, cfg.Valkey.UseTLS)
+}
+
 func TestLoadInvalidPublicKey(t *testing.T) {
 	privateKeyPEM, _ := testKeyPair(t)
 	t.Setenv("JWT_ACCESS_PRIVATE_KEY", privateKeyPEM)

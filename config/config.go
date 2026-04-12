@@ -181,7 +181,7 @@ func Load() (Config, error) {
 			Password: getEnv("VALKEY_PASSWORD", ""),
 			DB:       valkeyDB,
 			Prefix:   getEnv("VALKEY_PREFIX", "auth:refresh"),
-			UseTLS:   getEnvBool("VALKEY_USE_TLS", true),
+			UseTLS:   getEnvBool("VALKEY_USE_TLS", appEnv == "prod"),
 		},
 		Telemetry: TelemetryConfig{
 			OTLPEndpoint:         getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),

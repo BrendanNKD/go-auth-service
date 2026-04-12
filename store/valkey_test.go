@@ -9,42 +9,40 @@ import (
 
 	appconfig "auth-service/config"
 
-	"github.com/valkey-io/valkey-glide/go/v2/models"
-	"github.com/valkey-io/valkey-glide/go/v2/options"
-
 	"github.com/stretchr/testify/assert"
 )
 
 type mockClient struct {
-	setWithOptionsFn func(ctx context.Context, key, value string, opts options.SetOptions) (models.Result[string], error)
-	getFn            func(ctx context.Context, key string) (models.Result[string], error)
-	delFn            func(ctx context.Context, keys []string) (int64, error)
-	closed           bool
+	setFn  func(ctx context.Context, key, value string, ttl time.Duration) error
+	getFn  func(ctx context.Context, key string) (string, bool, error)
+	delFn  func(ctx context.Context, keys []string) error
+	closed bool
 }
 
-func (m *mockClient) SetWithOptions(ctx context.Context, key, value string, opts options.SetOptions) (models.Result[string], error) {
-	if m.setWithOptionsFn != nil {
-		return m.setWithOptionsFn(ctx, key, value, opts)
+func (m *mockClient) Set(ctx context.Context, key, value string, ttl time.Duration) error {
+	if m.setFn != nil {
+		return m.setFn(ctx, key, value, ttl)
 	}
-	return models.CreateStringResult("OK"), nil
+	return nil
 }
 
-func (m *mockClient) Get(ctx context.Context, key string) (models.Result[string], error) {
+func (m *mockClient) Get(ctx context.Context, key string) (string, bool, error) {
 	if m.getFn != nil {
 		return m.getFn(ctx, key)
 	}
-	return models.CreateNilStringResult(), nil
+	return "", false, nil
 }
 
-func (m *mockClient) Del(ctx context.Context, keys []string) (int64, error) {
+func (m *mockClient) Del(ctx context.Context, keys []string) error {
 	if m.delFn != nil {
 		return m.delFn(ctx, keys)
 	}
-	return 1, nil
+	return nil
 }
 
-func (m *mockClient) Close() {
+func (m *mockClient) Close() error {
 	m.closed = true
+	return nil
 }
 
 func newTestStore(client *mockClient) *ValkeyStore {
@@ -56,23 +54,23 @@ func TestValkeyStoreOperations(t *testing.T) {
 	sessionJSON := `{"current_token_hash":"hash","username":"user","role":"role","issued_at":"2024-01-01T00:00:00Z"}`
 
 	mock := &mockClient{
-		setWithOptionsFn: func(ctx context.Context, key, value string, opts options.SetOptions) (models.Result[string], error) {
-			return models.CreateStringResult("OK"), nil
+		setFn: func(ctx context.Context, key, value string, ttl time.Duration) error {
+			return nil
 		},
-		getFn: func(ctx context.Context, key string) (models.Result[string], error) {
+		getFn: func(ctx context.Context, key string) (string, bool, error) {
 			switch {
 			case strings.Contains(key, ":token:"):
-				return models.CreateStringResult(metadataJSON), nil
+				return metadataJSON, true, nil
 			case strings.Contains(key, ":session:"):
-				return models.CreateStringResult(sessionJSON), nil
+				return sessionJSON, true, nil
 			case strings.Contains(key, ":revoked:"):
-				return models.CreateStringResult("session-1"), nil
+				return "session-1", true, nil
 			default:
-				return models.CreateNilStringResult(), nil
+				return "", false, nil
 			}
 		},
-		delFn: func(ctx context.Context, keys []string) (int64, error) {
-			return 1, nil
+		delFn: func(ctx context.Context, keys []string) error {
+			return nil
 		},
 	}
 
@@ -118,11 +116,11 @@ func TestValkeyStoreOperations(t *testing.T) {
 }
 
 func TestNewValkeyStoreError(t *testing.T) {
-	original := newGlideClient
-	newGlideClient = func(cfg appconfig.ValkeyConfig) (valkeyClient, error) {
+	original := newValkeyClient
+	newValkeyClient = func(cfg appconfig.ValkeyConfig) (valkeyClient, error) {
 		return nil, errors.New("connect failed")
 	}
-	defer func() { newGlideClient = original }()
+	defer func() { newValkeyClient = original }()
 
 	_, err := NewValkeyStore(appconfig.ValkeyConfig{Addr: "localhost:6379", Prefix: "test"})
 	assert.Error(t, err)
@@ -130,11 +128,11 @@ func TestNewValkeyStoreError(t *testing.T) {
 
 func TestNewValkeyStoreSuccess(t *testing.T) {
 	mock := &mockClient{}
-	original := newGlideClient
-	newGlideClient = func(cfg appconfig.ValkeyConfig) (valkeyClient, error) {
+	original := newValkeyClient
+	newValkeyClient = func(cfg appconfig.ValkeyConfig) (valkeyClient, error) {
 		return mock, nil
 	}
-	defer func() { newGlideClient = original }()
+	defer func() { newValkeyClient = original }()
 
 	store, err := NewValkeyStore(appconfig.ValkeyConfig{Addr: "localhost:6379", Prefix: "test"})
 	assert.NoError(t, err)
@@ -143,8 +141,8 @@ func TestNewValkeyStoreSuccess(t *testing.T) {
 
 func TestValkeyStoreGetTokenInvalidJSON(t *testing.T) {
 	mock := &mockClient{
-		getFn: func(ctx context.Context, key string) (models.Result[string], error) {
-			return models.CreateStringResult("invalid"), nil
+		getFn: func(ctx context.Context, key string) (string, bool, error) {
+			return "invalid", true, nil
 		},
 	}
 	store := newTestStore(mock)
@@ -154,8 +152,8 @@ func TestValkeyStoreGetTokenInvalidJSON(t *testing.T) {
 
 func TestValkeyStoreGetSessionInvalidJSON(t *testing.T) {
 	mock := &mockClient{
-		getFn: func(ctx context.Context, key string) (models.Result[string], error) {
-			return models.CreateStringResult("invalid"), nil
+		getFn: func(ctx context.Context, key string) (string, bool, error) {
+			return "invalid", true, nil
 		},
 	}
 	store := newTestStore(mock)
@@ -165,8 +163,8 @@ func TestValkeyStoreGetSessionInvalidJSON(t *testing.T) {
 
 func TestValkeyStoreGetTokenEmptyResponse(t *testing.T) {
 	mock := &mockClient{
-		getFn: func(ctx context.Context, key string) (models.Result[string], error) {
-			return models.CreateNilStringResult(), nil
+		getFn: func(ctx context.Context, key string) (string, bool, error) {
+			return "", false, nil
 		},
 	}
 	store := newTestStore(mock)
@@ -177,8 +175,8 @@ func TestValkeyStoreGetTokenEmptyResponse(t *testing.T) {
 
 func TestValkeyStoreGetSessionEmptyResponse(t *testing.T) {
 	mock := &mockClient{
-		getFn: func(ctx context.Context, key string) (models.Result[string], error) {
-			return models.CreateNilStringResult(), nil
+		getFn: func(ctx context.Context, key string) (string, bool, error) {
+			return "", false, nil
 		},
 	}
 	store := newTestStore(mock)
@@ -189,8 +187,8 @@ func TestValkeyStoreGetSessionEmptyResponse(t *testing.T) {
 
 func TestValkeyStoreIsRevokedEmptyResponse(t *testing.T) {
 	mock := &mockClient{
-		getFn: func(ctx context.Context, key string) (models.Result[string], error) {
-			return models.CreateNilStringResult(), nil
+		getFn: func(ctx context.Context, key string) (string, bool, error) {
+			return "", false, nil
 		},
 	}
 	store := newTestStore(mock)
@@ -201,8 +199,8 @@ func TestValkeyStoreIsRevokedEmptyResponse(t *testing.T) {
 
 func TestValkeyStoreGetTokenError(t *testing.T) {
 	mock := &mockClient{
-		getFn: func(ctx context.Context, key string) (models.Result[string], error) {
-			return models.CreateNilStringResult(), errors.New("get error")
+		getFn: func(ctx context.Context, key string) (string, bool, error) {
+			return "", false, errors.New("get error")
 		},
 	}
 	store := newTestStore(mock)
@@ -212,8 +210,8 @@ func TestValkeyStoreGetTokenError(t *testing.T) {
 
 func TestValkeyStoreGetSessionError(t *testing.T) {
 	mock := &mockClient{
-		getFn: func(ctx context.Context, key string) (models.Result[string], error) {
-			return models.CreateNilStringResult(), errors.New("get error")
+		getFn: func(ctx context.Context, key string) (string, bool, error) {
+			return "", false, errors.New("get error")
 		},
 	}
 	store := newTestStore(mock)
@@ -223,8 +221,8 @@ func TestValkeyStoreGetSessionError(t *testing.T) {
 
 func TestValkeyStoreIsRevokedError(t *testing.T) {
 	mock := &mockClient{
-		getFn: func(ctx context.Context, key string) (models.Result[string], error) {
-			return models.CreateNilStringResult(), errors.New("get error")
+		getFn: func(ctx context.Context, key string) (string, bool, error) {
+			return "", false, errors.New("get error")
 		},
 	}
 	store := newTestStore(mock)
@@ -246,8 +244,8 @@ func TestValkeyStoreSaveTokenMarshalError(t *testing.T) {
 
 func TestValkeyStoreSaveTokenSetError(t *testing.T) {
 	mock := &mockClient{
-		setWithOptionsFn: func(ctx context.Context, key, value string, opts options.SetOptions) (models.Result[string], error) {
-			return models.CreateNilStringResult(), errors.New("set error")
+		setFn: func(ctx context.Context, key, value string, ttl time.Duration) error {
+			return errors.New("set error")
 		},
 	}
 	store := newTestStore(mock)
@@ -269,8 +267,8 @@ func TestValkeyStoreSaveSessionMarshalError(t *testing.T) {
 
 func TestValkeyStoreSaveSessionSetError(t *testing.T) {
 	mock := &mockClient{
-		setWithOptionsFn: func(ctx context.Context, key, value string, opts options.SetOptions) (models.Result[string], error) {
-			return models.CreateNilStringResult(), errors.New("set error")
+		setFn: func(ctx context.Context, key, value string, ttl time.Duration) error {
+			return errors.New("set error")
 		},
 	}
 	store := newTestStore(mock)
@@ -280,8 +278,8 @@ func TestValkeyStoreSaveSessionSetError(t *testing.T) {
 
 func TestValkeyStoreMarkRevokedError(t *testing.T) {
 	mock := &mockClient{
-		setWithOptionsFn: func(ctx context.Context, key, value string, opts options.SetOptions) (models.Result[string], error) {
-			return models.CreateNilStringResult(), errors.New("set error")
+		setFn: func(ctx context.Context, key, value string, ttl time.Duration) error {
+			return errors.New("set error")
 		},
 	}
 	store := newTestStore(mock)
@@ -291,8 +289,8 @@ func TestValkeyStoreMarkRevokedError(t *testing.T) {
 
 func TestValkeyStoreRevokeTokenError(t *testing.T) {
 	mock := &mockClient{
-		delFn: func(ctx context.Context, keys []string) (int64, error) {
-			return 0, errors.New("del error")
+		delFn: func(ctx context.Context, keys []string) error {
+			return errors.New("del error")
 		},
 	}
 	store := newTestStore(mock)
@@ -302,8 +300,8 @@ func TestValkeyStoreRevokeTokenError(t *testing.T) {
 
 func TestValkeyStoreRevokeSessionError(t *testing.T) {
 	mock := &mockClient{
-		delFn: func(ctx context.Context, keys []string) (int64, error) {
-			return 0, errors.New("del error")
+		delFn: func(ctx context.Context, keys []string) error {
+			return errors.New("del error")
 		},
 	}
 	store := newTestStore(mock)
