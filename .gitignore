@@ -24,6 +24,8 @@ coverage.out
 test-report.json
 reports/
 .gocache/
+.owasp-dependency-check-data/
+owasp-dependency-check-report/
 __pycache__/
 
 # ── OS / IDE ─────────────────────────────────────────────────────────────────
