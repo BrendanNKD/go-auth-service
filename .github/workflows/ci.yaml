@@ -473,6 +473,8 @@ jobs:
     name: Build & Image Scan
     runs-on: ubuntu-latest
     needs: [lint, test]
+    env:
+      GO_VERSION: "1.26.2"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -487,8 +489,19 @@ jobs:
           push: false
           load: true
           tags: authservice:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          build-args: |
+            GO_VERSION=${{ env.GO_VERSION }}
+          cache-from: type=gha,scope=authservice-go-${{ env.GO_VERSION }}
+          cache-to: type=gha,mode=max,scope=authservice-go-${{ env.GO_VERSION }}
+
+      - name: Verify Image Go Toolchain
+        run: |
+          container_id="$(docker create authservice:ci)"
+          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+          docker cp "$container_id:/app/auth-service" auth-service-image
+          docker run --rm -v "$PWD:/work" -w /work "golang:${GO_VERSION}-alpine" \
+            go version -m auth-service-image | tee image-go-version.txt
+          grep -q "go${GO_VERSION}" image-go-version.txt
 
       # Trivy image scan – table output for logs
       - name: Trivy Image Scan
