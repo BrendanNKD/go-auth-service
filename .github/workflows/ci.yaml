@@ -28,10 +28,35 @@ concurrency:
 # ──────────────────────────────────────────────────────────────────────────────
 jobs:
 
+  pipeline-map:
+    name: Pipeline Map
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish Pipeline Map
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## CI Pipeline Map
+
+          ```mermaid
+          flowchart LR
+            trigger["Commit / PR"] --> map["Pipeline Map"]
+            map --> lint["Lint"]
+            map --> test["Unit Tests + HTML Report"]
+            map --> secret["Secret Scan"]
+            map --> sca["SCA & Misconfig Scan"]
+            lint --> build["Build & Image Scan"]
+            test --> build
+            secret --> summary["CI Summary"]
+            sca --> summary
+            build --> summary
+          ```
+          EOF
+
   # ── 1. Lint ─────────────────────────────────────────────────────────────────
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    needs: pipeline-map
     env:
       CGO_ENABLED: "1"
     steps:
@@ -55,8 +80,9 @@ jobs:
 
   # ── 2. Unit Tests ──────────────────────────────────────────────────────────
   test:
-    name: Unit Tests
+    name: Unit Tests + HTML Report
     runs-on: ubuntu-latest
+    needs: pipeline-map
     env:
       CGO_ENABLED: "1"
     steps:
@@ -80,23 +106,41 @@ jobs:
           go test ./... -race -count=1 \
             -coverprofile=coverage.out \
             -covermode=atomic \
-            -json > test-report.json 2>&1 || true
-          # Verify tests actually passed (go test -json exits 0 even on failure when piped)
-          go test ./... -race -count=1 -coverprofile=/dev/null
+            -json > test-report.json 2>&1
+
+      - name: Generate HTML Test Report
+        if: always()
+        run: |
+          mkdir -p reports
+          if [ -s coverage.out ]; then
+            go tool cover -html=coverage.out -o reports/coverage.html || echo "coverage.html unavailable" > reports/coverage-error.txt
+            go tool cover -func=coverage.out > reports/coverage.txt || echo "coverage.txt unavailable" > reports/coverage.txt
+          else
+            echo "coverage.out was not produced." > reports/coverage.txt
+          fi
+          python3 .github/scripts/render-test-report.py \
+            --json test-report.json \
+            --coverage coverage.out \
+            --html reports/test-report.html \
+            --summary reports/test-summary.md
+          cat reports/test-summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Test Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
+          name: unit-test-report
           path: |
+            reports/
             test-report.json
             coverage.out
+          if-no-files-found: warn
 
   # ── 3. Secret Scan (Gitleaks) ──────────────────────────────────────────────
   secret-scan:
     name: Secret Scan
     runs-on: ubuntu-latest
+    needs: pipeline-map
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -112,6 +156,7 @@ jobs:
   sca-scan:
     name: SCA & Misconfig Scan
     runs-on: ubuntu-latest
+    needs: pipeline-map
     env:
       SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
     steps:
@@ -228,3 +273,38 @@ jobs:
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
+
+  ci-summary:
+    name: CI Summary
+    runs-on: ubuntu-latest
+    needs: [lint, test, secret-scan, sca-scan, build]
+    if: always()
+    steps:
+      - name: Publish CI Summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Pipeline Result
+
+          | Stage | Result |
+          | --- | --- |
+          | Lint | `${{ needs.lint.result }}` |
+          | Unit Tests + HTML Report | `${{ needs.test.result }}` |
+          | Secret Scan | `${{ needs['secret-scan'].result }}` |
+          | SCA & Misconfig Scan | `${{ needs['sca-scan'].result }}` |
+          | Build & Image Scan | `${{ needs.build.result }}` |
+
+          ```mermaid
+          flowchart LR
+            lint["Lint: ${{ needs.lint.result }}"]
+            test["Unit Tests + HTML Report: ${{ needs.test.result }}"]
+            secret["Secret Scan: ${{ needs['secret-scan'].result }}"]
+            sca["SCA & Misconfig Scan: ${{ needs['sca-scan'].result }}"]
+            build["Build & Image Scan: ${{ needs.build.result }}"]
+            done["CI Summary"]
+            lint --> build
+            test --> build
+            secret --> done
+            sca --> done
+            build --> done
+          ```
+          EOF
