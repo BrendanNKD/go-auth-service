@@ -107,7 +107,7 @@ jobs:
 
       # Gate: block push if image contains a CRITICAL vulnerability with a fix
       - name: Trivy Image Scan (gate)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.version }}"
           severity: CRITICAL

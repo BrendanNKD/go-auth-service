@@ -165,7 +165,7 @@ jobs:
 
       # Trivy filesystem scan – table output for log readability
       - name: Trivy Filesystem Scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type: fs
           scan-ref: .
@@ -177,7 +177,7 @@ jobs:
 
       # Trivy filesystem scan – SARIF for GitHub Security tab
       - name: Trivy Filesystem SARIF Report
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type: fs
           scan-ref: .
@@ -246,7 +246,7 @@ jobs:
 
       # Trivy image scan – table output for logs
       - name: Trivy Image Scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: authservice:ci
           severity: CRITICAL,HIGH
@@ -257,7 +257,7 @@ jobs:
 
       # Trivy image scan – SARIF for GitHub Security tab
       - name: Trivy Image SARIF Report
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: authservice:ci
           severity: CRITICAL,HIGH
