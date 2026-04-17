@@ -40,6 +40,8 @@ func TestSetupRoutes(t *testing.T) {
 		{"POST", "/api/v1/auth/refresh"},
 		{"GET", "/api/v1/.well-known/jwks.json"},
 		{"GET", "/api/v1/health"},
+		{"GET", "/api/v1/debug/instance"},
+		{"GET", "/lb-demo"},
 	}
 
 	for _, tt := range tests {

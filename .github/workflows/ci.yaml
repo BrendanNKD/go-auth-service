@@ -389,6 +389,7 @@ jobs:
       COOKIE_SAMESITE: lax
       CORS_ALLOWED_ORIGINS: http://127.0.0.1:8080
       OTEL_EXPORTER_OTLP_ENDPOINT: ""
+      ZAP_HEALTH_URL: http://127.0.0.1:8080/api/v1/health
       ZAP_TARGET_URL: http://127.0.0.1:8080/api/v1/health
     services:
       postgres:
@@ -429,6 +430,9 @@ jobs:
       - name: Download Dependencies
         run: go mod download
 
+      - name: Build App for ZAP
+        run: go build -o zap-auth-service .
+
       - name: Prepare ZAP Database
         env:
           PGPASSWORD: postgres
@@ -439,19 +443,35 @@ jobs:
 
       - name: Start App for ZAP
         run: |
-          export JWT_ACCESS_PRIVATE_KEY
-          JWT_ACCESS_PRIVATE_KEY="$(openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 2>/dev/null)"
+          set -euo pipefail
 
-          go run . > zap-app.log 2>&1 &
-          echo "$!" > zap-app.pid
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out zap-access-private-key.pem 2>/dev/null
+          openssl pkey -in zap-access-private-key.pem -pubout -out zap-access-public-key.pem >/dev/null 2>&1
+          export JWT_ACCESS_PRIVATE_KEY="$(cat zap-access-private-key.pem)"
+          export JWT_ACCESS_PUBLIC_KEY="$(cat zap-access-public-key.pem)"
+          export JWT_ACCESS_KID="zap-ci"
+
+          nohup ./zap-auth-service > zap-app.log 2>&1 &
+          app_pid="$!"
+          echo "$app_pid" > zap-app.pid
 
           for attempt in {1..60}; do
-            if curl -fsS "$ZAP_TARGET_URL"; then
+            if curl --fail --silent --show-error --max-time 5 "$ZAP_HEALTH_URL" >/dev/null 2>&1; then
+              echo "Application is healthy at $ZAP_HEALTH_URL"
               exit 0
             fi
+
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+              echo "::error::Application exited before becoming healthy."
+              cat zap-app.log
+              exit 1
+            fi
+
+            echo "Waiting for application health check ($attempt/60)..."
             sleep 2
           done
 
+          echo "::error::Application did not become healthy at $ZAP_HEALTH_URL"
           cat zap-app.log
           exit 1
 
@@ -460,9 +480,15 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p owasp-zap-baseline-report
+          chmod a+rwx owasp-zap-baseline-report
+
+          docker run --rm --network host \
+            ghcr.io/zaproxy/zaproxy:stable \
+            curl --fail --silent --show-error --max-time 10 "$ZAP_HEALTH_URL" >/dev/null
+
           docker run --rm --network host \
             -v "$PWD/owasp-zap-baseline-report:/zap/wrk:rw" \
-            zaproxy/zap-stable:stable \
+            ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
               -t "$ZAP_TARGET_URL" \
               -r zap-report.html \
