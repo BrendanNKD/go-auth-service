@@ -17,6 +17,11 @@ Version bumps are derived from branch prefixes when building releases:
 - `patch/` or `fix/` → patch version bump.
 
 
+## Integration Docs
+
+- [Valkey session check for Python services](docs/valkey-session-check-for-python-services.md)
+- [Frontend load balancer demo page](docs/frontend-load-balancer-demo.md)
+
 ## Container
 podman/docker run --network devnet --env-file .env --name auth-service -p 8080:8080 auth-service
 
