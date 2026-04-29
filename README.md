@@ -5,8 +5,8 @@ Authentication service. This repository ships the Go service, Docker image, and 
 ## Release Information
 
 <!-- release-start -->
-- Latest version: v1.1.0
-- Release date (UTC): 2026-04-17
+- Latest version: v1.2.0
+- Release date (UTC): 2026-04-29
 <!-- release-end -->
 
 ## Versioning
