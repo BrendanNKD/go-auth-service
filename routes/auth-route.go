@@ -8,6 +8,7 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// test demo
 func SetupRoutes(cfg config.Config, authHandler *handlers.AuthHandler) *mux.Router {
 	router := mux.NewRouter()
 
